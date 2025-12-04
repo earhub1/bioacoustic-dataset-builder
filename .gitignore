@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# Big data files
+data/audio_chunks/
+data/mfcc_chunks/
+
 # Distribution / packaging
 .Python
 build/
