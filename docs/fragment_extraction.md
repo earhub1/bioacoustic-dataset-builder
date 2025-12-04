@@ -14,6 +14,10 @@ O script [`src/extract_fragments.py`](../src/extract_fragments.py) implementa um
 - `--hop-length` (padrão `6400`): salto entre frames; com SR=64 kHz, cada frame representa 0,1 s.
 - `--limit` e `--seed` (padrões `None` e `42`): amostra aleatoriamente até `limit` linhas para extração reprodutível.
 - `--output-dir` (padrão `data/results/fragments`): destino dos `.npy` e do `manifest.csv`.
+- `--inject-non-event`: ativa a geração de fragmentos adicionais rotulados como `Nothing` a partir de regiões não anotadas.
+- `--non-event-count`: quantidade de fragmentos `Nothing` a gerar **por arquivo de áudio** quando a flag anterior está ativa.
+- `--non-event-duration` ou `--non-event-duration-range MIN MAX`: controla a duração (fixa ou intervalo aleatório) dos fragmentos `Nothing`;
+  caso omita ambos, a duração padrão é `frame_length / target_sr` (0,1 s com os padrões atuais).
 
 ## Processo
 1. **Carregamento do CSV**: lê o manifesto de detecções e, se `limit` for definido, seleciona uma amostra aleatória estável (`seed`).
@@ -22,6 +26,7 @@ O script [`src/extract_fragments.py`](../src/extract_fragments.py) implementa um
 4. **Extração de MFCC**: calcula `n_mels` coeficientes com `frame_length`, `hop_length` e `window` definidos, produzindo uma matriz `[n_mels, n_frames]`.
 5. **Persistência dos fragmentos**: salva os MFCCs em `.npy` dentro de uma subpasta com o nome do `label` (`output_dir/<label>/`), usando o índice da linha para compor o nome do arquivo.
 6. **Manifesto de saída**: gera `output_dir/manifest.csv` contendo: `index`, `snippet_path`, `label`, `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames`.
+   - Fragmentos `Nothing` usam `label="Nothing"` e `index=-1` para indicar que não derivam de uma linha do CSV original.
 
 ## Exemplo de uso
 ```bash
