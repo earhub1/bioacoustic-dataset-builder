@@ -1,0 +1,32 @@
+# Fluxo de extração de fragmentos
+
+O script [`src/extract_fragments.py`](../src/extract_fragments.py) implementa uma CLI para gerar fragmentos de áudio anotados e seus coeficientes de Mel (MFCC) a partir de um manifesto CSV.
+
+## Entrada
+- CSV de detecções (padrão: `data/events/labels_0_30kHz_reapath.csv`).
+- Colunas esperadas: `filepath` (ou `file`), `onset_s`, `offset_s`, `label`.
+
+## Parâmetros principais
+- `--target-sr` (padrão `64000`): taxa de amostragem usada ao carregar o trecho; realiza downsample se o arquivo tiver SR maior.
+- `--n-mels` (padrão `9`): número de coeficientes MFCC por frame.
+- `--window` (padrão `hann`): janela aplicada ao cálculo dos MFCCs.
+- `--frame-length` (padrão `6400`): tamanho da FFT em amostras na SR de destino.
+- `--hop-length` (padrão `6400`): salto entre frames; com SR=64 kHz, cada frame representa 0,1 s.
+- `--limit` e `--seed` (padrões `None` e `42`): amostra aleatoriamente até `limit` linhas para extração reprodutível.
+- `--output-dir` (padrão `data/results/fragments`): destino dos `.npy` e do `manifest.csv`.
+
+## Processo
+1. **Carregamento do CSV**: lê o manifesto de detecções e, se `limit` for definido, seleciona uma amostra aleatória estável (`seed`).
+2. **Resolução dos caminhos**: caminhos relativos são resolvidos em relação ao diretório do CSV para localizar o arquivo de áudio correspondente.
+3. **Recorte do áudio**: usa `librosa.load` para buscar apenas o trecho entre `onset_s` e `offset_s` já na SR alvo (`target_sr`). Se o áudio tiver múltiplos canais, apenas um canal é utilizado.
+4. **Extração de MFCC**: calcula `n_mels` coeficientes com `frame_length`, `hop_length` e `window` definidos, produzindo uma matriz `[n_mels, n_frames]`.
+5. **Persistência dos fragmentos**: salva os MFCCs em `.npy` dentro de uma subpasta com o nome do `label` (`output_dir/<label>/`), usando o índice da linha para compor o nome do arquivo.
+6. **Manifesto de saída**: gera `output_dir/manifest.csv` contendo: `index`, `snippet_path`, `label`, `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames`.
+
+## Exemplo de uso
+```bash
+python src/extract_fragments.py \
+  --csv-path data/events/labels_0_30kHz_reapath.csv \
+  --target-sr 64000 \
+  --output-dir data/results/fragments
+```
