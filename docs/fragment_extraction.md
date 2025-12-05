@@ -1,6 +1,7 @@
 # Fluxo de extração de fragmentos
 
-O script [`src/extract_fragments.py`](../src/extract_fragments.py) implementa uma CLI para gerar fragmentos de áudio anotados e seus coeficientes de Mel (MFCC) a partir de um manifesto CSV.
+O script [`src/extract_fragments.py`](../src/extract_fragments.py) implementa uma CLI para gerar fragmentos de áudio anotados e
+seus coeficientes de Mel (MFCC) a partir de um manifesto CSV.
 
 ## Entrada
 - CSV de detecções (padrão: `data/events/labels_0_30kHz_reapath.csv`).
@@ -28,10 +29,30 @@ O script [`src/extract_fragments.py`](../src/extract_fragments.py) implementa um
 6. **Manifesto de saída**: gera `output_dir/manifest.csv` contendo: `index`, `snippet_path`, `label`, `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames`.
    - Fragmentos `Nothing` usam `label="Nothing"` e `index=-1` para indicar que não derivam de uma linha do CSV original.
 
-## Exemplo de uso
+## Fluxo em duas etapas com manifestos de Nothing
+Para reduzir o acoplamento e inspecionar os trechos de fundo antes de extrair MFCCs, você pode gerar um manifesto dedicado de `Nothing` e, opcionalmente, um manifesto combinado:
+
+1. **Gerar manifesto Nothing**: use [`src/generate_nothing_manifest.py`](../src/generate_nothing_manifest.py) para amostrar intervalos livres por arquivo de áudio (respeitando `--non-event-count`, `--non-event-duration` ou `--non-event-duration-range`, e `--seed`). O script grava um `manifest_nothing.csv` com colunas `index=-1`, `label="Nothing"`, `filepath`, `onset_s`, `offset_s`, `duration_s` e `n_frames` estimados.
+2. **Manifesto combinado (opcional)**: forneça `--combined-manifest-path` para gravar um CSV que concatena as anotações originais com as linhas `Nothing` (mantendo `index` original ou `-1` para Nothing).
+3. **Extrair MFCCs**: a qualquer momento, aponte o `extract_fragments.py` para o manifesto desejado (original, Nothing ou combinado) para materializar os fragmentos como `.npy`.
+
+### Exemplo: gerar e extrair Nothing separadamente
 ```bash
-python src/extract_fragments.py \
+# Passo 1: gerar manifesto dedicado de Nothing e um combinado
+python src/generate_nothing_manifest.py \
   --csv-path data/events/labels_0_30kHz_reapath.csv \
-  --target-sr 64000 \
-  --output-dir data/results/fragments
+  --non-event-count 3 \
+  --non-event-duration-range 0.1 0.3 \
+  --nothing-manifest-path data/events/manifest_nothing.csv \
+  --combined-manifest-path data/events/manifest_combined.csv
+
+# Passo 2: extrair MFCCs apenas para Nothing
+python src/extract_fragments.py \
+  --csv-path data/events/manifest_nothing.csv \
+  --output-dir data/results/fragments_nothing
+
+# Passo 3 (opcional): extrair MFCCs de todos os eventos usando o manifesto combinado
+python src/extract_fragments.py \
+  --csv-path data/events/manifest_combined.csv \
+  --output-dir data/results/fragments_combined
 ```
