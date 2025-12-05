@@ -15,10 +15,8 @@ seus coeficientes de Mel (MFCC) a partir de um manifesto CSV.
 - `--hop-length` (padrão `6400`): salto entre frames; com SR=64 kHz, cada frame representa 0,1 s.
 - `--limit` e `--seed` (padrões `None` e `42`): amostra aleatoriamente até `limit` linhas para extração reprodutível.
 - `--output-dir` (padrão `data/results/fragments`): destino dos `.npy` e do `manifest.csv`.
-- `--inject-non-event`: ativa a geração de fragmentos adicionais rotulados como `Nothing` a partir de regiões não anotadas.
-- `--non-event-count`: quantidade de fragmentos `Nothing` a gerar **por arquivo de áudio** quando a flag anterior está ativa.
-- `--non-event-duration` ou `--non-event-duration-range MIN MAX`: controla a duração (fixa ou intervalo aleatório) dos fragmentos `Nothing`;
-  caso omita ambos, a duração padrão é `frame_length / target_sr` (0,1 s com os padrões atuais).
+
+Para eventos "Nothing", gere primeiro um manifesto dedicado ou combinado com o `generate_nothing_manifest.py` (detalhado abaixo) e em seguida execute o `extract_fragments.py` apontando para esse CSV.
 
 ## Processo
 1. **Carregamento do CSV**: lê o manifesto de detecções e, se `limit` for definido, seleciona uma amostra aleatória estável (`seed`).
@@ -26,8 +24,7 @@ seus coeficientes de Mel (MFCC) a partir de um manifesto CSV.
 3. **Recorte do áudio**: usa `librosa.load` para buscar apenas o trecho entre `onset_s` e `offset_s` já na SR alvo (`target_sr`). Se o áudio tiver múltiplos canais, apenas um canal é utilizado.
 4. **Extração de MFCC**: calcula `n_mels` coeficientes com `frame_length`, `hop_length` e `window` definidos, produzindo uma matriz `[n_mels, n_frames]`.
 5. **Persistência dos fragmentos**: salva os MFCCs em `.npy` dentro de uma subpasta com o nome do `label` (`output_dir/<label>/`), usando o índice da linha para compor o nome do arquivo.
-6. **Manifesto de saída**: gera `output_dir/manifest.csv` contendo: `index`, `snippet_path`, `label`, `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames`.
-   - Fragmentos `Nothing` usam `label="Nothing"` e `index=-1` para indicar que não derivam de uma linha do CSV original.
+6. **Manifesto de saída**: gera `output_dir/manifest.csv` contendo: `index`, `snippet_path`, `label`, `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames`. Fragmentos seguem os campos já presentes no CSV de entrada (se você apontar para um manifesto que contenha `Nothing`, eles serão extraídos e registrados da mesma forma, preservando `index=-1`).
 
 ## Fluxo em duas etapas com manifestos de Nothing
 Para reduzir o acoplamento e inspecionar os trechos de fundo antes de extrair MFCCs, você pode gerar um manifesto dedicado de `Nothing` e, opcionalmente, um manifesto combinado:
