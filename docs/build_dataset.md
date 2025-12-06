@@ -11,6 +11,8 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 
 ## Parâmetros principais
 - `--sequence-duration`: duração alvo (em segundos) de cada sequência gerada. O script converte essa duração em número de frames usando `frame_length` e `hop_length` (padrões: 6400 cada, com `target_sr=64000`, equivalendo a ~0,1 s por frame).
+- `--max-fragments-per-sequence`: limite opcional de quantos fragmentos podem ser concatenados. Se atingido, a sequência é finalizada mesmo que a duração alvo não tenha sido alcançada.
+- `--allow-partial-fragments`: por padrão, fragmentos maiores que o orçamento restante são ignorados e um novo trecho é sorteado. Ative esta flag para permitir incluir fragmentos longos mesmo que excedam o alvo; eles serão cortados na etapa final de truncamento.
 - `--num-sequences`: quantas sequências gerar.
 - `--nothing-ratio`: controla a probabilidade relativa de amostrar fragmentos `Nothing` versus demais labels quando ambos estão disponíveis. Por exemplo, 1.0 tende a um equilíbrio 1:1 entre `Nothing` e eventos; valores menores reduzem a presença de `Nothing`.
 - `--seed`: fixa o gerador pseudoaleatório para que a escolha de trechos e a ordem se repitam entre execuções.
@@ -23,8 +25,9 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
    - se só houver `Nothing`, amostra-se dele;
    - se ambos existirem, sorteia-se `Nothing` com peso `nothing_ratio` e os demais labels com peso 1.
 4. **Amostragem de fragmento**: seleciona-se aleatoriamente uma linha do pool do label escolhido e carrega-se o `.npy` correspondente. O script ignora fragmentos ausentes ou com `n_frames <= 0`.
-5. **Concatenação temporal**: os fragmentos são empilhados na dimensão temporal (`axis=1`). O processo continua até atingir ou ultrapassar o número de frames alvo derivado de `--sequence-duration`, com um limite de tentativas para evitar laços infinitos.
-6. **Ajuste final**: se a sequência exceder os frames alvo, é truncada. Cada segmento recebe `start_frame`, `end_frame`, `start_s` e `end_s` calculados a partir de `frame_length`/`hop_length`/`target_sr`.
+5. **Concatenação temporal**: os fragmentos são empilhados na dimensão temporal (`axis=1`). O processo continua até atingir ou ultrapassar o número de frames alvo derivado de `--sequence-duration`, respeitando `--max-fragments-per-sequence` (quando definido) e um limite de tentativas para evitar laços infinitos.
+6. **Tratamento de fragmentos longos**: por padrão, se um fragmento exceder o orçamento restante de frames, ele é ignorado e outro trecho é sorteado. Com `--allow-partial-fragments`, o fragmento pode ser usado mesmo que ultrapasse o limite; a sequência será truncada no ajuste final, marcando o segmento como truncado.
+7. **Ajuste final**: se a sequência exceder os frames alvo, é truncada. Cada segmento recebe `start_frame`, `end_frame`, `start_s`, `end_s` e `truncated` (quando houve corte) calculados a partir de `frame_length`/`hop_length`/`target_sr`.
 
 ## Saídas
 - **Sequências**: salvas como `.npy` em `--output-dir` (padrão `data/results/sequences`) com o padrão `sequence_<n>.npy`. Cada arquivo contém um tensor de features concatenadas (mesma dimensão de frequência dos fragmentos de entrada).
@@ -32,8 +35,11 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
   - `sequence_path`: caminho para o `.npy` salvo.
   - `total_frames` / `total_duration_s`: frames e duração total da sequência.
   - `n_segments`: quantidade de fragmentos concatenados.
-  - `segments`: JSON com a lista ordenada dos trechos incluídos, contendo `label`, `snippet_path`, `start_frame`, `end_frame`, `start_s`, `end_s` para cada segmento.
+  - `segments`: JSON com a lista ordenada dos trechos incluídos, contendo `label`, `snippet_path`, `start_frame`, `end_frame`, `start_s`, `end_s` e `truncated` para cada segmento.
   - `seed`: valor usado para a amostragem reprodutível.
+  - `skipped_too_long`: quantos fragmentos foram descartados por excederem o orçamento restante sem `--allow-partial-fragments`.
+  - `fragment_limit_reached`: indica se a sequência encerrou por atingir `--max-fragments-per-sequence`.
+  - `truncated_segments`: quantos segmentos foram cortados na etapa final de truncamento.
 
 ## Exemplo de uso
 ```bash

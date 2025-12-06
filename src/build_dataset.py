@@ -56,6 +56,15 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Target duration in seconds for each synthetic sequence.",
     )
     parser.add_argument(
+        "--max-fragments-per-sequence",
+        type=int,
+        default=None,
+        help=(
+            "Optional cap on how many fragments can be concatenated per sequence. "
+            "If set, sampling stops when this limit is reached even if the duration target was not met."
+        ),
+    )
+    parser.add_argument(
         "--num-sequences",
         type=int,
         default=10,
@@ -74,6 +83,14 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=int,
         default=64000,
         help="Sampling rate used to interpret frame/hop durations (match the extractor).",
+    )
+    parser.add_argument(
+        "--allow-partial-fragments",
+        action="store_true",
+        help=(
+            "Permit including fragments longer than the remaining budget; the tail will be trimmed to the sequence limit. "
+            "By default, fragments longer than the remaining frames are skipped and resampled."
+        ),
     )
     parser.add_argument(
         "--frame-length",
@@ -186,7 +203,9 @@ def build_sequence(
     hop_length: int,
     nothing_ratio: float,
     rng: np.random.Generator,
-) -> tuple[np.ndarray, List[dict]]:
+    max_fragments: Optional[int] = None,
+    allow_partial_fragments: bool = False,
+) -> tuple[np.ndarray, List[dict], dict]:
     label_pools: Dict[str, List[int]] = {}
     for idx, row in df.iterrows():
         label_pools.setdefault(row["label"], []).append(idx)
@@ -196,8 +215,14 @@ def build_sequence(
     feature_chunks: List[np.ndarray] = []
     max_attempts = max(target_frames * 5, 100)
     attempts = 0
+    skipped_too_long = 0
+    fragment_limit_reached = False
 
     while current_frames < target_frames and attempts < max_attempts:
+        if max_fragments is not None and len(segments) >= max_fragments:
+            fragment_limit_reached = True
+            break
+
         attempts += 1
         label = pick_label(label_pools, rng, nothing_ratio)
         if label is None:
@@ -220,6 +245,11 @@ def build_sequence(
         if n_frames <= 0:
             continue
 
+        remaining_frames = target_frames - current_frames
+        if n_frames > remaining_frames and not allow_partial_fragments:
+            skipped_too_long += 1
+            continue
+
         start_frame = current_frames
         end_frame = current_frames + n_frames
 
@@ -239,6 +269,7 @@ def build_sequence(
         raise RuntimeError("Unable to assemble sequence: no valid fragments were sampled.")
 
     combined = np.concatenate(feature_chunks, axis=1)
+    truncated_segments = 0
     if combined.shape[1] > target_frames:
         combined = combined[:, :target_frames]
 
@@ -248,16 +279,24 @@ def build_sequence(
             continue
         end_frame = min(seg["end_frame"], target_frames)
         start_frame = seg["start_frame"]
+        truncated_flag = end_frame < seg["end_frame"]
+        if truncated_flag:
+            truncated_segments += 1
         trimmed_segments.append(
             {
                 **seg,
                 "end_frame": int(end_frame),
                 "start_s": frames_to_seconds(start_frame, sr, frame_length, hop_length),
                 "end_s": frames_to_seconds(end_frame, sr, frame_length, hop_length),
+                "truncated": truncated_flag,
             }
         )
 
-    return combined, trimmed_segments
+    return combined, trimmed_segments, {
+        "skipped_too_long": skipped_too_long,
+        "fragment_limit_reached": fragment_limit_reached,
+        "truncated_segments": truncated_segments,
+    }
 
 
 def save_sequence(
@@ -307,7 +346,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     records: List[dict] = []
 
     for seq_idx in range(args.num_sequences):
-        features, segments = build_sequence(
+        features, segments, meta = build_sequence(
             df=df,
             target_frames=target_frames,
             sr=args.target_sr,
@@ -315,6 +354,8 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             hop_length=args.hop_length,
             nothing_ratio=args.nothing_ratio,
             rng=rng,
+            max_fragments=args.max_fragments_per_sequence,
+            allow_partial_fragments=args.allow_partial_fragments,
         )
 
         record = save_sequence(
@@ -327,6 +368,9 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             hop_length=args.hop_length,
         )
         record["seed"] = args.seed
+        record["skipped_too_long"] = meta["skipped_too_long"]
+        record["fragment_limit_reached"] = meta["fragment_limit_reached"]
+        record["truncated_segments"] = meta["truncated_segments"]
         records.append(record)
 
     manifest = pd.DataFrame(records)
