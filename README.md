@@ -64,22 +64,23 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
 
 1. **Escolha os fragmentos de entrada**: defina os diretórios com `manifest.csv` resultantes da extração (padrão: `data/results/fragments`). Use `--fragments-dir` múltiplas vezes se quiser combinar fontes.
 2. **Filtre labels**: por padrão, `NI` é excluído. Para incluir/excluir explicitamente, use `--include-labels` e/ou `--exclude-labels`.
-3. **Defina duração e balanceamento**: use `--sequence-duration` para a duração alvo (s) e `--nothing-ratio` para controlar a razão Nothing:eventos (ex.: 1.0 ≈ 1:1 quando ambos existem). Ajuste `--num-sequences` para quantas fitas deseja. Se precisar limitar quantos trechos entram em cada sequência, use `--max-fragments-per-sequence`; para aceitar fragmentos maiores que o orçamento restante, ative `--allow-partial-fragments` (por padrão eles são descartados e um novo trecho é sorteado).
+3. **Defina duração, balanceamento e splits**: use `--sequence-duration` para a duração alvo (s) e `--nothing-ratio` para controlar a razão Nothing:eventos (ex.: 1.0 ≈ 1:1 quando ambos existem). Ajuste `--num-sequences` para quantas fitas deseja. Se precisar limitar quantos trechos entram em cada sequência, use `--max-fragments-per-sequence`; para aceitar fragmentos maiores que o orçamento restante, ative `--allow-partial-fragments` (por padrão eles são descartados e um novo trecho é sorteado). Controle o split de saída com `--train-ratio`, `--val-ratio` e `--test-ratio` (padrão 0.7/0.15/0.15); as sequências serão gravadas em subpastas `train/`, `val/` e `test` sob `--output-dir`.
 4. **Gere as sequências**:
    ```bash
-   python src/build_dataset.py \
-     --fragments-dir data/results/fragments_combined \
-     --exclude-labels NI \
-     --sequence-duration 6.0 \
-   --nothing-ratio 0.8 \
-   --num-sequences 20 \
+  python src/build_dataset.py \
+    --fragments-dir data/results/fragments_combined \
+    --exclude-labels NI \
+    --sequence-duration 6.0 \
+  --nothing-ratio 0.8 \
+  --num-sequences 20 \
+    --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1 \
     --max-fragments-per-sequence 8 \
     --output-dir data/results/sequences \
     --seed 7
   ```
 5. **Saídas**:
-   - Sequências salvas como `.npy` em `data/results/sequences/sequence_<n>.npy`.
-   - `manifest_sequences.csv` no mesmo diretório, contendo `sequence_path`, `total_duration_s`, `total_frames`, `n_segments`, `seed`, contadores de fragmentos descartados ou truncados (`skipped_too_long`, `fragment_limit_reached`, `truncated_segments`) e uma coluna `segments` (JSON) com a ordem, rótulo, posição (frames/segundos) e se cada fragmento foi truncado.
+   - Sequências salvas como `.npy` em `data/results/sequences/{train,val,test}/sequence_<n>.npy`.
+   - `manifest_sequences.csv` na raiz de `data/results/sequences` com uma coluna `split` indicando o destino e manifests por split em cada subpasta, contendo `sequence_path`, `total_duration_s`, `total_frames`, `n_segments`, `seed`, contadores de fragmentos descartados ou truncados (`skipped_too_long`, `fragment_limit_reached`, `truncated_segments`), `split` e uma coluna `segments` (JSON) com a ordem, rótulo, posição (frames/segundos) e se cada fragmento foi truncado.
 
 ## Próximos passos
 - A partir dos fragmentos extraídos, você pode aplicar rotinas de balanceamento, split de treino/validação/teste e data augmentation conforme as necessidades do modelo alvo.

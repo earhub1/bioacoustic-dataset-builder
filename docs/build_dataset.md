@@ -14,6 +14,7 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 - `--max-fragments-per-sequence`: limite opcional de quantos fragmentos podem ser concatenados. Se atingido, a sequência é finalizada mesmo que a duração alvo não tenha sido alcançada.
 - `--allow-partial-fragments`: por padrão, fragmentos maiores que o orçamento restante são ignorados e um novo trecho é sorteado. Ative esta flag para permitir incluir fragmentos longos mesmo que excedam o alvo; eles serão cortados na etapa final de truncamento.
 - `--num-sequences`: quantas sequências gerar.
+- `--train-ratio`, `--val-ratio`, `--test-ratio`: proporções (padrão 0.7/0.15/0.15) usadas para direcionar cada sequência gerada para as pastas `train/`, `val/` ou `test` sob `--output-dir`. Os valores devem somar 1.0.
 - `--nothing-ratio`: controla a probabilidade relativa de amostrar fragmentos `Nothing` versus demais labels quando ambos estão disponíveis. Por exemplo, 1.0 tende a um equilíbrio 1:1 entre `Nothing` e eventos; valores menores reduzem a presença de `Nothing`.
 - `--seed`: fixa o gerador pseudoaleatório para que a escolha de trechos e a ordem se repitam entre execuções.
 
@@ -30,8 +31,8 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 7. **Ajuste final**: se a sequência exceder os frames alvo, é truncada. Cada segmento recebe `start_frame`, `end_frame`, `start_s`, `end_s` e `truncated` (quando houve corte) calculados a partir de `frame_length`/`hop_length`/`target_sr`.
 
 ## Saídas
-- **Sequências**: salvas como `.npy` em `--output-dir` (padrão `data/results/sequences`) com o padrão `sequence_<n>.npy`. Cada arquivo contém um tensor de features concatenadas (mesma dimensão de frequência dos fragmentos de entrada).
-- **Manifesto de sequências** (`manifest_sequences.csv`): salvo no mesmo diretório. Cada linha descreve uma sequência gerada com as colunas:
+- **Sequências**: salvas como `.npy` em subpastas de split sob `--output-dir` (padrão `data/results/sequences/{train,val,test}`) com o padrão `sequence_<n>.npy`. Cada arquivo contém um tensor de features concatenadas (mesma dimensão de frequência dos fragmentos de entrada).
+- **Manifesto de sequências** (`manifest_sequences.csv`): salvo no diretório raiz de `--output-dir`, com uma coluna `split` indicando o destino (`train`, `val` ou `test`). Um manifesto separado é salvo em cada subpasta de split, contendo apenas as sequências daquele conjunto. Cada linha descreve uma sequência gerada com as colunas:
   - `sequence_path`: caminho para o `.npy` salvo.
   - `total_frames` / `total_duration_s`: frames e duração total da sequência.
   - `n_segments`: quantidade de fragmentos concatenados.
@@ -40,6 +41,7 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
   - `skipped_too_long`: quantos fragmentos foram descartados por excederem o orçamento restante sem `--allow-partial-fragments`.
   - `fragment_limit_reached`: indica se a sequência encerrou por atingir `--max-fragments-per-sequence`.
   - `truncated_segments`: quantos segmentos foram cortados na etapa final de truncamento.
+  - `split`: conjunto destino da sequência.
 
 ## Exemplo de uso
 ```bash
@@ -49,8 +51,9 @@ python src/build_dataset.py \
   --sequence-duration 6.0 \
   --nothing-ratio 0.8 \
   --num-sequences 20 \
+  --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1 \
   --output-dir data/results/sequences \
   --seed 7
 ```
 
-Este comando gera 20 sequências de aproximadamente 6 s cada, balanceando a seleção de `Nothing` e eventos com `nothing-ratio=0.8`, ignorando a label `NI`, e grava tanto as sequências quanto o `manifest_sequences.csv` em `data/results/sequences`.
+Este comando gera 20 sequências de aproximadamente 6 s cada, balanceando a seleção de `Nothing` e eventos com `nothing-ratio=0.8`, ignorando a label `NI`, e grava as sequências nas subpastas `train/`, `val/` e `test` de `data/results/sequences`, além do `manifest_sequences.csv` agregado (com coluna `split`).

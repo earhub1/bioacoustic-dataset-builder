@@ -71,6 +71,24 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Number of sequences to generate.",
     )
     parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.7,
+        help="Proportion of sequences to route to the train split.",
+    )
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.15,
+        help="Proportion of sequences to route to the validation split.",
+    )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=0.15,
+        help="Proportion of sequences to route to the test split.",
+    )
+    parser.add_argument(
         "--nothing-ratio",
         type=float,
         default=1.0,
@@ -307,6 +325,7 @@ def save_sequence(
     sr: int,
     frame_length: int,
     hop_length: int,
+    split: str,
 ) -> dict:
     ensure_output_dir(output_dir)
     seq_path = output_dir / f"sequence_{sequence_idx}.npy"
@@ -320,6 +339,7 @@ def save_sequence(
         "total_duration_s": total_duration_s,
         "n_segments": len(segments),
         "segments": json.dumps(segments),
+        "split": split,
     }
 
 
@@ -342,6 +362,18 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     if target_frames <= 0:
         raise ValueError("sequence-duration must be positive.")
 
+    if min(args.train_ratio, args.val_ratio, args.test_ratio) < 0:
+        raise ValueError("Split ratios must be non-negative.")
+    split_total = args.train_ratio + args.val_ratio + args.test_ratio
+    if not np.isclose(split_total, 1.0):
+        raise ValueError("train-ratio + val-ratio + test-ratio must sum to 1.0.")
+    split_labels = ["train", "val", "test"]
+    split_probs = np.array([args.train_ratio, args.val_ratio, args.test_ratio], dtype=float)
+
+    if split_probs.sum() <= 0:
+        raise ValueError("At least one split ratio must be greater than zero.")
+    split_probs = split_probs / split_probs.sum()
+
     rng = np.random.default_rng(args.seed)
     records: List[dict] = []
 
@@ -358,14 +390,18 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             allow_partial_fragments=args.allow_partial_fragments,
         )
 
+        split = rng.choice(split_labels, p=split_probs)
+        split_dir = args.output_dir / split
+
         record = save_sequence(
-            output_dir=args.output_dir,
+            output_dir=split_dir,
             sequence_idx=seq_idx,
             features=features,
             segments=segments,
             sr=args.target_sr,
             frame_length=args.frame_length,
             hop_length=args.hop_length,
+            split=split,
         )
         record["seed"] = args.seed
         record["skipped_too_long"] = meta["skipped_too_long"]
@@ -374,9 +410,19 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
         records.append(record)
 
     manifest = pd.DataFrame(records)
+    ensure_output_dir(args.output_dir)
     manifest_path = args.output_dir / "manifest_sequences.csv"
     manifest.to_csv(manifest_path, index=False)
     logger.info("Saved %d sequences to %s", len(manifest), manifest_path)
+
+    for split in split_labels:
+        split_df = manifest[manifest["split"] == split]
+        if split_df.empty:
+            continue
+        split_manifest_path = args.output_dir / split / "manifest_sequences.csv"
+        ensure_output_dir(split_manifest_path.parent)
+        split_df.to_csv(split_manifest_path, index=False)
+        logger.info("Saved %d %s sequences to %s", len(split_df), split, split_manifest_path)
     return manifest
 
 
