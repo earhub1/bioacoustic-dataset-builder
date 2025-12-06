@@ -39,5 +39,23 @@ Ferramentas para preparar datasets bioacústicos (especialmente gravações mari
    ```
    O extrator lê cada linha do manifesto, recorta o trecho solicitado (downsample opcional via `--target-sr`), calcula MFCCs (`--n-mels`, `--frame-length`, `--hop-length`, `--window`) e grava os arquivos em subpastas por `label`, além de `manifest.csv` com `snippet_path`, `label`, `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames` e `index` (herdado do CSV de entrada).
 
+## Passo a passo para calibrar Nothing sem viciar o modelo
+Para evitar que o dataset fique dominado por silêncios muito homogêneos, ajuste a quantidade e a duração dos trechos Nothing antes de gerar o manifesto:
+
+1. **Inspecione as durações positivas**: observe a distribuição de `offset_s - onset_s` no CSV original (por exemplo, com um histograma rápido no notebook ou em Python) para saber os limites típicos das classes anotadas.
+2. **Defina um intervalo de duração variável**: escolha `--non-event-duration-range <min> <max>` inspirado nesses limites (ex.: 0.1–0.4 s), em vez de uma duração fixa. Isso cria fragmentos de fundo com tamanhos variados, mais próximos dos eventos reais.
+3. **Balanceie a quantidade por arquivo**: use `--non-event-count` para manter uma razão controlada com os eventos anotados (ex.: 1:1 ou 1:2 por arquivo). Se um áudio tem poucas anotações, considere reduzir o count para não gerar um volume excessivo de negativos.
+4. **Gere o manifesto Nothing**: execute o gerador com as escolhas acima. Exemplo:
+   ```bash
+   python src/generate_nothing_manifest.py \
+     --csv-path data/events/labels_0_30kHz_reapath.csv \
+     --non-event-count 2 \
+     --non-event-duration-range 0.12 0.35 \
+     --seed 42 \
+     --nothing-manifest-path data/events/manifest_nothing.csv
+   ```
+5. **(Opcional) Crie o manifesto combinado**: inclua `--combined-manifest-path` para já obter um CSV com eventos + Nothing e reutilizá-lo diretamente no extrator.
+6. **Extraia as features**: aponte `extract_fragments.py` para o manifesto escolhido (Nothing ou combinado) e gere os MFCCs.
+
 ## Próximos passos
 - A partir dos fragmentos extraídos, você pode aplicar rotinas de balanceamento, split de treino/validação/teste e data augmentation conforme as necessidades do modelo alvo.
