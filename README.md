@@ -57,5 +57,26 @@ Para evitar que o dataset fique dominado por silêncios muito homogêneos, ajust
 5. **(Opcional) Crie o manifesto combinado**: inclua `--combined-manifest-path` para já obter um CSV com eventos + Nothing e reutilizá-lo diretamente no extrator.
 6. **Extraia as features**: aponte `extract_fragments.py` para o manifesto escolhido (Nothing ou combinado) e gere os MFCCs.
 
+## Montar sequências sintéticas com `build_dataset.py` (opcional)
+Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas concatenando Nothing e eventos, ignorando rótulos indesejados (ex.: `NI`). Isso ajuda a treinar modelos com sequências mais realistas e balanceadas.
+
+1. **Escolha os fragmentos de entrada**: defina os diretórios com `manifest.csv` resultantes da extração (padrão: `data/results/fragments`). Use `--fragments-dir` múltiplas vezes se quiser combinar fontes.
+2. **Filtre labels**: por padrão, `NI` é excluído. Para incluir/excluir explicitamente, use `--include-labels` e/ou `--exclude-labels`.
+3. **Defina duração e balanceamento**: use `--sequence-duration` para a duração alvo (s) e `--nothing-ratio` para controlar a razão Nothing:eventos (ex.: 1.0 ≈ 1:1 quando ambos existem). Ajuste `--num-sequences` para quantas fitas deseja.
+4. **Gere as sequências**:
+   ```bash
+   python src/build_dataset.py \
+     --fragments-dir data/results/fragments_combined \
+     --exclude-labels NI \
+     --sequence-duration 6.0 \
+     --nothing-ratio 0.8 \
+     --num-sequences 20 \
+     --output-dir data/results/sequences \
+     --seed 7
+   ```
+5. **Saídas**:
+   - Sequências salvas como `.npy` em `data/results/sequences/sequence_<n>.npy`.
+   - `manifest_sequences.csv` no mesmo diretório, contendo `sequence_path`, `total_duration_s`, `total_frames`, `n_segments`, `seed` e uma coluna `segments` (JSON) com a ordem, rótulo e posição (frames/segundos) de cada fragmento dentro da sequência.
+
 ## Próximos passos
 - A partir dos fragmentos extraídos, você pode aplicar rotinas de balanceamento, split de treino/validação/teste e data augmentation conforme as necessidades do modelo alvo.
