@@ -53,3 +53,16 @@ python src/extract_fragments.py \
   --csv-path data/events/manifest_combined.csv \
   --output-dir data/results/fragments_combined
 ```
+
+## Análise exploratória das durações (suporte para calibrar Nothing)
+Antes de definir os ranges de duração para Nothing, você pode inspecionar a distribuição das anotações originais com `src/analyze_event_durations.py`:
+
+```bash
+python src/analyze_event_durations.py \
+  --csv-path data/events/labels_0_30kHz_reapath.csv \
+  --output-dir docs/figures \
+  --include-labels DELFIN BALEIA \   # opcional
+  --min-duration 0.02 --max-duration 5  # opcional
+```
+
+O script calcula `duration_s = offset_s - onset_s`, salva `duration_stats.csv` (média, mediana, p05/p95, min/max por label e geral) e gera `duration_histograms.png` e `duration_boxplots.png` no diretório escolhido (padrão `docs/figures/`). Use os percentis observados (p. ex. p05/p95) para definir `--non-event-duration-range` ao rodar o `generate_nothing_manifest.py` e obter trechos de fundo mais realistas.

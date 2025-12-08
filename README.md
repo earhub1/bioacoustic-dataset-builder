@@ -42,7 +42,14 @@ Ferramentas para preparar datasets bioacústicos (especialmente gravações mari
 ## Passo a passo para calibrar Nothing sem viciar o modelo
 Para evitar que o dataset fique dominado por silêncios muito homogêneos, ajuste a quantidade e a duração dos trechos Nothing antes de gerar o manifesto:
 
-1. **Inspecione as durações positivas**: observe a distribuição de `offset_s - onset_s` no CSV original (por exemplo, com um histograma rápido no notebook ou em Python) para saber os limites típicos das classes anotadas.
+1. **Inspecione as durações positivas**: use o CLI `src/analyze_event_durations.py` para gerar estatísticas e gráficos (histogramas e boxplots) das durações `offset_s - onset_s` por label e no geral. Exemplo:
+   ```bash
+   python src/analyze_event_durations.py \
+     --csv-path data/events/labels_0_30kHz_reapath.csv \
+     --output-dir docs/figures \
+     --include-labels DELFIN BALEIA  # opcional
+   ```
+   O comando grava `duration_stats.csv`, `duration_histograms.png` e `duration_boxplots.png` (por padrão em `docs/figures/`), que você pode usar para definir limites de Nothing mais realistas.
 2. **Defina um intervalo de duração variável**: escolha `--non-event-duration-range <min> <max>` inspirado nesses limites (ex.: 0.1–0.4 s), em vez de uma duração fixa. Isso cria fragmentos de fundo com tamanhos variados, mais próximos dos eventos reais.
 3. **Balanceie a quantidade por arquivo**: use `--non-event-count` para manter uma razão controlada com os eventos anotados (ex.: 1:1 ou 1:2 por arquivo). Se um áudio tem poucas anotações, considere reduzir o count para não gerar um volume excessivo de negativos.
 4. **Gere o manifesto Nothing**: execute o gerador com as escolhas acima. Exemplo:
