@@ -59,7 +59,7 @@ python src/build_dataset.py \
 Este comando gera 20 sequências de aproximadamente 6 s cada, balanceando a seleção de `Nothing` e eventos com `nothing-ratio=0.8`, ignorando a label `NI`, e grava as sequências nas subpastas `train/`, `val/` e `test` de `data/results/sequences`, além do `manifest_sequences.csv` agregado (com coluna `split`).
 
 ## Visualizar sequências geradas (opcional)
-Use `src/visualize_sequences.py` para inspecionar cada fita sintética. O script reconstrói a linha do tempo aproximada em áudio usando as anotações do manifesto de fragmentos e gera um subplot com quatro faixas: waveform reconstituído, espectrograma, MFCC armazenado e máscara binária (0 = Nothing, 1 = demais classes).
+Use `src/visualize_sequences.py` para inspecionar cada fita sintética. O script reconstrói a linha do tempo aproximada em áudio usando as anotações do manifesto de fragmentos e gera um subplot com quatro faixas: waveform reconstituído, espectrograma, MFCC armazenado e máscara binária (0 = Nothing, 1 = demais classes). Veja mais detalhes e exemplos em `docs/visualize_sequences.md`.
 
 Entradas principais:
 - `--sequence-manifest`: caminho para o `manifest_sequences.csv` produzido pelo builder (padrão: `data/results/sequences/manifest_sequences.csv`).
