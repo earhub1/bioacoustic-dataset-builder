@@ -16,13 +16,17 @@ seus coeficientes de Mel (MFCC) a partir de um manifesto CSV.
 - `--limit` e `--seed` (padrões `None` e `42`): amostra aleatoriamente até `limit` linhas para extração reprodutível.
 - `--min-duration` / `--max-duration` (padrões `None`): filtram linhas com `offset_s - onset_s` fora do intervalo desejado antes
   de extrair; o extrator registra quantas foram mantidas ou descartadas.
+- `--max-per-label` / `--max-nothing` (padrões `None`): aplicam tetos por rótulo antes da amostragem global; se um grupo excede
+  o limite, o extrator sorteia um subconjunto reprodutível por `label` (com `--seed`) e registra quantas linhas foram mantidas
+  ou descartadas. `--max-nothing` vale apenas para `Nothing`; os demais rótulos usam `--max-per-label`.
 - `--output-dir` (padrão `data/results/fragments`): destino dos `.npy` e do `manifest.csv`.
 
 Para eventos "Nothing", gere primeiro um manifesto dedicado ou combinado com o `generate_nothing_manifest.py` (detalhado abaixo) e em seguida execute o `extract_fragments.py` apontando para esse CSV.
 
 ## Processo
 1. **Carregamento do CSV**: lê o manifesto de detecções, aplica filtros opcionais de duração (`--min-duration`/`--max-duration`)
-   registrando quantas linhas foram descartadas e, se `limit` for definido, seleciona uma amostra aleatória estável (`seed`).
+   e tetos por rótulo (`--max-per-label`/`--max-nothing`) registrando quantas linhas foram descartadas. Se `limit` for definido,
+   uma amostra aleatória estável (`seed`) é aplicada depois desses filtros.
 2. **Resolução dos caminhos**: caminhos relativos são resolvidos em relação ao diretório do CSV para localizar o arquivo de áudio correspondente.
 3. **Recorte do áudio**: usa `librosa.load` para buscar apenas o trecho entre `onset_s` e `offset_s` já na SR alvo (`target_sr`). Se o áudio tiver múltiplos canais, apenas um canal é utilizado.
 4. **Extração de MFCC**: calcula `n_mels` coeficientes com `frame_length`, `hop_length` e `window` definidos, produzindo uma matriz `[n_mels, n_frames]`.
@@ -56,6 +60,20 @@ python src/extract_fragments.py \
   --csv-path data/events/manifest_combined.csv \
   --output-dir data/results/fragments_combined
 ```
+
+### Exemplo: limitar por rótulo antes de extrair
+```bash
+python src/extract_fragments.py \
+  --csv-path data/events/manifest_combined.csv \
+  --output-dir data/results/fragments_limited \
+  --max-per-label 1000 \
+  --max-nothing 2000 \
+  --max-duration 67 \
+  --seed 42
+```
+O comando acima mantém no máximo 1000 linhas para cada rótulo diferente de `Nothing` e até 2000 para `Nothing` antes da
+amostragem global (`--limit`), além de descartar eventos acima de 67 s. O log informa quantas linhas por label foram mantidas
+ou descartadas; o `manifest.csv` final reflete apenas esse subconjunto.
 
 ## Análise exploratória das durações (suporte para calibrar Nothing)
 Antes de definir os ranges de duração para Nothing, você pode inspecionar a distribuição das anotações originais com `src/analyze_event_durations.py` e calcular o intervalo central que cobre a maior parte dos eventos:

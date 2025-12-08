@@ -86,6 +86,24 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Optional limit on the number of fragments to extract (random selection).",
     )
     parser.add_argument(
+        "--max-per-label",
+        type=int,
+        default=None,
+        help=(
+            "Optional cap on rows per label (applied to all labels except 'Nothing'); "
+            "use with --seed for reproducible sampling."
+        ),
+    )
+    parser.add_argument(
+        "--max-nothing",
+        type=int,
+        default=None,
+        help=(
+            "Optional cap on rows for the 'Nothing' label; if unset, falls back to --max-per-label "
+            "when that flag is provided."
+        ),
+    )
+    parser.add_argument(
         "--min-duration",
         type=float,
         default=None,
@@ -188,6 +206,25 @@ def choose_non_event_duration(args: argparse.Namespace, rng: np.random.Generator
     return default
 
 
+def save_empty_manifest(output_dir: Path) -> pd.DataFrame:
+    manifest = pd.DataFrame(
+        columns=[
+            "index",
+            "snippet_path",
+            "label",
+            "source_filepath",
+            "onset_s",
+            "offset_s",
+            "duration_s",
+            "n_frames",
+        ]
+    )
+    manifest_path = output_dir / "manifest.csv"
+    manifest.to_csv(manifest_path, index=False)
+    logger.info("Saved empty manifest to %s", manifest_path)
+    return manifest
+
+
 def find_free_intervals(events: List[tuple], audio_duration: float, min_duration: float) -> List[tuple]:
     if audio_duration <= 0:
         return []
@@ -256,6 +293,54 @@ def select_rows(df: pd.DataFrame, limit: Optional[int], seed: int) -> pd.DataFra
     return df.sample(n=limit, random_state=seed)
 
 
+def apply_label_limits(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    if df.empty or (args.max_per_label is None and args.max_nothing is None):
+        return df
+
+    if args.max_per_label is not None and args.max_per_label < 0:
+        raise ValueError("--max-per-label must be non-negative")
+    if args.max_nothing is not None and args.max_nothing < 0:
+        raise ValueError("--max-nothing must be non-negative")
+
+    rng = np.random.default_rng(args.seed)
+    kept_frames: List[pd.DataFrame] = []
+    log_rows = []
+    total_before = len(df)
+
+    for label, group in df.groupby("label", sort=False):
+        limit = args.max_per_label
+        if label == "Nothing" and args.max_nothing is not None:
+            limit = args.max_nothing
+
+        if limit is None or len(group) <= limit:
+            kept = group
+            skipped = 0
+        else:
+            random_state = int(rng.integers(0, 2**32 - 1))
+            kept = group.sample(n=limit, random_state=random_state)
+            skipped = len(group) - len(kept)
+
+        kept_frames.append(kept)
+        log_rows.append((label, len(group), len(kept), skipped))
+
+    result = pd.concat(kept_frames).sort_index()
+    kept_total = len(result)
+    skipped_total = total_before - kept_total
+
+    details = ", ".join(
+        f"{label}: kept {kept} of {total}, skipped {skipped}"
+        for label, total, kept, skipped in log_rows
+    )
+    logger.info(
+        "Label caps applied: kept %d of %d rows (skipped %d). Details: %s",
+        kept_total,
+        total_before,
+        skipped_total,
+        details,
+    )
+    return result
+
+
 def build_events_by_file(df: pd.DataFrame, csv_dir: Path) -> dict:
     events_by_file: dict = {}
     for _, row in df.iterrows():
@@ -296,20 +381,12 @@ def extract_fragments(args: argparse.Namespace) -> pd.DataFrame:
         df = filtered
         if df.empty:
             logger.warning("No rows remain after applying duration filters; exiting early.")
-            manifest = pd.DataFrame(columns=[
-                "index",
-                "snippet_path",
-                "label",
-                "source_filepath",
-                "onset_s",
-                "offset_s",
-                "duration_s",
-                "n_frames",
-            ])
-            manifest_path = args.output_dir / "manifest.csv"
-            manifest.to_csv(manifest_path, index=False)
-            logger.info("Saved empty manifest to %s", manifest_path)
-            return manifest
+            return save_empty_manifest(args.output_dir)
+
+    df = apply_label_limits(df, args)
+    if df.empty:
+        logger.warning("No rows remain after applying label caps; exiting early.")
+        return save_empty_manifest(args.output_dir)
     selected = select_rows(df, args.limit, args.seed)
     csv_dir = args.csv_path.parent
 

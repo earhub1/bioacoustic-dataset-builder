@@ -36,10 +36,20 @@ Ferramentas para preparar datasets bioacústicos (especialmente gravações mari
    python src/extract_fragments.py \
      --csv-path data/events/manifest_combined.csv \
      --output-dir data/results/fragments_combined
+     
+    # Exemplo com filtros de duração e tetos por rótulo
+    python src/extract_fragments.py \
+      --csv-path data/events/manifest_combined.csv \
+      --output-dir data/results/fragments_limited \
+      --max-per-label 1000 \          # limite por rótulo (exceto Nothing)
+      --max-nothing 2000 \            # limite específico para Nothing
+      --max-duration 67 \             # descarta outliers longos
+      --seed 42
    ```
    O extrator lê cada linha do manifesto, pode aplicar filtros de duração (`--min-duration`/`--max-duration` em segundos) antes de
-   processar, recorta o trecho solicitado (downsample opcional via `--target-sr`), calcula MFCCs (`--n-mels`, `--frame-length`,
-   `--hop-length`, `--window`) e grava os arquivos em subpastas por `label`, além de `manifest.csv` com `snippet_path`, `label`,
+   processar, aplicar tetos por rótulo (`--max-per-label` e `--max-nothing`) antes de qualquer amostragem global (`--limit`),
+   recortar o trecho solicitado (downsample opcional via `--target-sr`), calcular MFCCs (`--n-mels`, `--frame-length`,
+   `--hop-length`, `--window`) e gravar os arquivos em subpastas por `label`, além de `manifest.csv` com `snippet_path`, `label`,
    `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames` e `index` (herdado do CSV de entrada).
 
 ## Passo a passo para calibrar Nothing sem viciar o modelo
