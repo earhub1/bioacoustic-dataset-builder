@@ -37,7 +37,10 @@ Ferramentas para preparar datasets bioacústicos (especialmente gravações mari
      --csv-path data/events/manifest_combined.csv \
      --output-dir data/results/fragments_combined
    ```
-   O extrator lê cada linha do manifesto, recorta o trecho solicitado (downsample opcional via `--target-sr`), calcula MFCCs (`--n-mels`, `--frame-length`, `--hop-length`, `--window`) e grava os arquivos em subpastas por `label`, além de `manifest.csv` com `snippet_path`, `label`, `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames` e `index` (herdado do CSV de entrada).
+   O extrator lê cada linha do manifesto, pode aplicar filtros de duração (`--min-duration`/`--max-duration` em segundos) antes de
+   processar, recorta o trecho solicitado (downsample opcional via `--target-sr`), calcula MFCCs (`--n-mels`, `--frame-length`,
+   `--hop-length`, `--window`) e grava os arquivos em subpastas por `label`, além de `manifest.csv` com `snippet_path`, `label`,
+   `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames` e `index` (herdado do CSV de entrada).
 
 ## Passo a passo para calibrar Nothing sem viciar o modelo
 Para evitar que o dataset fique dominado por silêncios muito homogêneos, ajuste a quantidade e a duração dos trechos Nothing antes de gerar o manifesto:

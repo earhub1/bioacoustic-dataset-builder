@@ -14,12 +14,15 @@ seus coeficientes de Mel (MFCC) a partir de um manifesto CSV.
 - `--frame-length` (padrão `6400`): tamanho da FFT em amostras na SR de destino.
 - `--hop-length` (padrão `6400`): salto entre frames; com SR=64 kHz, cada frame representa 0,1 s.
 - `--limit` e `--seed` (padrões `None` e `42`): amostra aleatoriamente até `limit` linhas para extração reprodutível.
+- `--min-duration` / `--max-duration` (padrões `None`): filtram linhas com `offset_s - onset_s` fora do intervalo desejado antes
+  de extrair; o extrator registra quantas foram mantidas ou descartadas.
 - `--output-dir` (padrão `data/results/fragments`): destino dos `.npy` e do `manifest.csv`.
 
 Para eventos "Nothing", gere primeiro um manifesto dedicado ou combinado com o `generate_nothing_manifest.py` (detalhado abaixo) e em seguida execute o `extract_fragments.py` apontando para esse CSV.
 
 ## Processo
-1. **Carregamento do CSV**: lê o manifesto de detecções e, se `limit` for definido, seleciona uma amostra aleatória estável (`seed`).
+1. **Carregamento do CSV**: lê o manifesto de detecções, aplica filtros opcionais de duração (`--min-duration`/`--max-duration`)
+   registrando quantas linhas foram descartadas e, se `limit` for definido, seleciona uma amostra aleatória estável (`seed`).
 2. **Resolução dos caminhos**: caminhos relativos são resolvidos em relação ao diretório do CSV para localizar o arquivo de áudio correspondente.
 3. **Recorte do áudio**: usa `librosa.load` para buscar apenas o trecho entre `onset_s` e `offset_s` já na SR alvo (`target_sr`). Se o áudio tiver múltiplos canais, apenas um canal é utilizado.
 4. **Extração de MFCC**: calcula `n_mels` coeficientes com `frame_length`, `hop_length` e `window` definidos, produzindo uma matriz `[n_mels, n_frames]`.

@@ -86,6 +86,18 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Optional limit on the number of fragments to extract (random selection).",
     )
     parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=None,
+        help="Minimum event duration in seconds; rows shorter than this are skipped.",
+    )
+    parser.add_argument(
+        "--max-duration",
+        type=float,
+        default=None,
+        help="Maximum event duration in seconds; rows longer than this are skipped.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -260,9 +272,46 @@ def build_events_by_file(df: pd.DataFrame, csv_dir: Path) -> dict:
 def extract_fragments(args: argparse.Namespace) -> pd.DataFrame:
     ensure_output_dir(args.output_dir)
     df = pd.read_csv(args.csv_path)
+    durations = df["offset_s"] - df["onset_s"]
+
+    mask = pd.Series(True, index=df.index)
+    below_min = above_max = 0
+    if args.min_duration is not None:
+        below_min = int((durations < args.min_duration).sum())
+        mask &= durations >= args.min_duration
+    if args.max_duration is not None:
+        above_max = int((durations > args.max_duration).sum())
+        mask &= durations <= args.max_duration
+
+    if args.min_duration is not None or args.max_duration is not None:
+        filtered = df[mask]
+        skipped = len(df) - len(filtered)
+        logger.info(
+            "Duration filter applied: kept %d rows, skipped %d (below_min=%d, above_max=%d)",
+            len(filtered),
+            skipped,
+            below_min,
+            above_max,
+        )
+        df = filtered
+        if df.empty:
+            logger.warning("No rows remain after applying duration filters; exiting early.")
+            manifest = pd.DataFrame(columns=[
+                "index",
+                "snippet_path",
+                "label",
+                "source_filepath",
+                "onset_s",
+                "offset_s",
+                "duration_s",
+                "n_frames",
+            ])
+            manifest_path = args.output_dir / "manifest.csv"
+            manifest.to_csv(manifest_path, index=False)
+            logger.info("Saved empty manifest to %s", manifest_path)
+            return manifest
     selected = select_rows(df, args.limit, args.seed)
     csv_dir = args.csv_path.parent
-    rng = np.random.default_rng(args.seed)
 
     records: List[dict] = []
     for _, row in selected.iterrows():
