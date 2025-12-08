@@ -270,8 +270,12 @@ def process_row(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Skipping index %s due to error: %s", row.name, exc)
         return None
+    base_candidate = row.get("file")
+    if pd.isna(base_candidate) or str(base_candidate).strip() == "":
+        base_candidate = row.get("filepath")
+    base_filename = str(base_candidate) if base_candidate is not None else "fragment"
 
-    fragment_path = save_fragment(mfcc, output_dir, label, row.get("file", "fragment"), row.name)
+    fragment_path = save_fragment(mfcc, output_dir, label, base_filename, row.name)
     n_frames = mfcc.shape[1]
     duration = offset_s - onset_s
 
