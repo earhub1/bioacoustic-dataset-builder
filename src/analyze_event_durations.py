@@ -71,6 +71,15 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         default=40,
         help="Number of bins to use in histograms.",
     )
+    parser.add_argument(
+        "--coverage",
+        type=float,
+        default=0.9,
+        help=(
+            "Fraction of events to cover when computing the central duration interval "
+            "(e.g., 0.9 => central 90% range)."
+        ),
+    )
     return parser.parse_args(args=args)
 
 
@@ -107,7 +116,10 @@ def apply_filters(
     return filtered.reset_index(drop=True)
 
 
-def describe_durations(df: pd.DataFrame) -> pd.DataFrame:
+def describe_durations(df: pd.DataFrame, coverage: float) -> pd.DataFrame:
+    lower_q = (1 - coverage) / 2 * 100
+    upper_q = 100 - lower_q
+
     def _summary(series: pd.Series) -> dict:
         values = series.to_numpy()
         return {
@@ -118,6 +130,12 @@ def describe_durations(df: pd.DataFrame) -> pd.DataFrame:
             "p95": float(np.percentile(values, 95)) if len(values) else np.nan,
             "min": float(np.min(values)) if len(values) else np.nan,
             "max": float(np.max(values)) if len(values) else np.nan,
+            "central_lower_s": float(np.percentile(values, lower_q))
+            if len(values)
+            else np.nan,
+            "central_upper_s": float(np.percentile(values, upper_q))
+            if len(values)
+            else np.nan,
         }
 
     records = []
@@ -133,7 +151,9 @@ def describe_durations(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def plot_histograms(df: pd.DataFrame, output_dir: Path, bins: int) -> Path:
+def plot_histograms(
+    df: pd.DataFrame, output_dir: Path, bins: int, stats: pd.DataFrame
+) -> Path:
     labels = ["ALL"] + sorted(df["label"].unique())
     n_plots = len(labels)
     fig, axes = plt.subplots(
@@ -147,15 +167,30 @@ def plot_histograms(df: pd.DataFrame, output_dir: Path, bins: int) -> Path:
         axes = [axes]
 
     all_data = df["duration_s"].to_numpy()
+    overall_interval = stats.loc[stats["label"] == "ALL", [
+        "central_lower_s",
+        "central_upper_s",
+    ]].iloc[0]
     axes[0].hist(all_data, bins=bins, color="steelblue", edgecolor="black", alpha=0.8)
     axes[0].set_title("Distribuição de durações (todas as labels)")
     axes[0].set_ylabel("Contagem")
+    axes[0].axvline(overall_interval["central_lower_s"], color="red", linestyle="--")
+    axes[0].axvline(overall_interval["central_upper_s"], color="red", linestyle="--")
 
+    label_intervals = {
+        row.label: (row.central_lower_s, row.central_upper_s)
+        for row in stats.itertuples()
+    }
     for ax, label in zip(axes[1:], labels[1:]):
         label_data = df.loc[df["label"] == label, "duration_s"].to_numpy()
         ax.hist(label_data, bins=bins, color="orange", edgecolor="black", alpha=0.8)
         ax.set_title(f"Distribuição de durações — {label}")
         ax.set_ylabel("Contagem")
+        lower, upper = label_intervals.get(label, (np.nan, np.nan))
+        if not np.isnan(lower):
+            ax.axvline(lower, color="red", linestyle="--")
+        if not np.isnan(upper):
+            ax.axvline(upper, color="red", linestyle="--")
 
     axes[-1].set_xlabel("Duração (s)")
     path = output_dir / "duration_histograms.png"
@@ -183,6 +218,8 @@ def main() -> None:
 
     if args.bins <= 0:
         raise ValueError("--bins must be positive")
+    if not 0 < args.coverage < 1:
+        raise ValueError("--coverage must be in the interval (0, 1)")
 
     ensure_output_dir(args.output_dir)
     stats_path = args.stats_path or args.output_dir / "duration_stats.csv"
@@ -195,11 +232,11 @@ def main() -> None:
     if df.empty:
         raise ValueError("No events remain after applying filters.")
 
-    stats = describe_durations(df)
+    stats = describe_durations(df, args.coverage)
     stats.to_csv(stats_path, index=False)
     logger.info("Saved summary statistics to %s", stats_path)
 
-    hist_path = plot_histograms(df, args.output_dir, args.bins)
+    hist_path = plot_histograms(df, args.output_dir, args.bins, stats)
     box_path = plot_boxplot(df, args.output_dir)
     logger.info("Saved histogram to %s", hist_path)
     logger.info("Saved boxplot to %s", box_path)
@@ -212,6 +249,12 @@ def main() -> None:
         overall["median"],
         overall["p05"],
         overall["p95"],
+    )
+    logger.info(
+        "Central %.0f%% interval: [%.3f, %.3f] s",
+        args.coverage * 100,
+        overall["central_lower_s"],
+        overall["central_upper_s"],
     )
 
 

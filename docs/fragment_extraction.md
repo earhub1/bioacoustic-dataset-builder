@@ -58,14 +58,15 @@ python src/extract_fragments.py \
 ```
 
 ## Análise exploratória das durações (suporte para calibrar Nothing)
-Antes de definir os ranges de duração para Nothing, você pode inspecionar a distribuição das anotações originais com `src/analyze_event_durations.py`:
+Antes de definir os ranges de duração para Nothing, você pode inspecionar a distribuição das anotações originais com `src/analyze_event_durations.py` e calcular o intervalo central que cobre a maior parte dos eventos:
 
 ```bash
 python src/analyze_event_durations.py \
   --csv-path data/events/labels_0_30kHz_reapath.csv \
   --output-dir docs/figures \
+  --coverage 0.9 \
   --include-labels DELFIN BALEIA \   # opcional
   --min-duration 0.02 --max-duration 5  # opcional
 ```
 
-O script calcula `duration_s = offset_s - onset_s`, salva `duration_stats.csv` (média, mediana, p05/p95, min/max por label e geral) e gera `duration_histograms.png` e `duration_boxplots.png` no diretório escolhido (padrão `docs/figures/`). Use os percentis observados (p. ex. p05/p95) para definir `--non-event-duration-range` ao rodar o `generate_nothing_manifest.py` e obter trechos de fundo mais realistas.
+O script calcula `duration_s = offset_s - onset_s`, salva `duration_stats.csv` (média, mediana, p05/p95, min/max por label e geral) e gera `duration_histograms.png` e `duration_boxplots.png` no diretório escolhido (padrão `docs/figures/`). A tabela inclui `central_lower_s`/`central_upper_s` correspondentes ao `--coverage` escolhido (padrão 90%), também destacados no histograma com linhas verticais. Use esse intervalo central para definir `--non-event-duration-range` ao rodar o `generate_nothing_manifest.py`, descartando outliers ao selecionar trechos de fundo.
