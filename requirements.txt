@@ -2,3 +2,4 @@ librosa
 numpy
 pandas
 soundfile
+matplotlib

@@ -74,13 +74,14 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
   --nothing-ratio 0.8 \
   --num-sequences 20 \
     --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1 \
-    --max-fragments-per-sequence 8 \
-    --output-dir data/results/sequences \
-    --seed 7
+ --max-fragments-per-sequence 8 \
+ --output-dir data/results/sequences \
+ --seed 7
   ```
 5. **Saídas**:
    - Sequências salvas como `.npy` em `data/results/sequences/{train,val,test}/sequence_<n>.npy`.
    - `manifest_sequences.csv` na raiz de `data/results/sequences` com uma coluna `split` indicando o destino e manifests por split em cada subpasta, contendo `sequence_path`, `total_duration_s`, `total_frames`, `n_segments`, `seed`, contadores de fragmentos descartados ou truncados (`skipped_too_long`, `fragment_limit_reached`, `truncated_segments`), `split` e uma coluna `segments` (JSON) com a ordem, rótulo, posição (frames/segundos) e se cada fragmento foi truncado.
+6. **(Opcional) Visualizar sequências**: execute `python src/visualize_sequences.py --sequence-manifest data/results/sequences/manifest_sequences.csv --fragments-dir data/results/fragments_combined --output-dir data/results/sequence_viz --splits train val` para gerar PNGs com waveform reconstruído, espectrograma, MFCC armazenado e uma máscara binária (0 = Nothing, 1 = demais classes). Consulte `docs/build_dataset.md` para mais detalhes.
 
 ## Próximos passos
 - A partir dos fragmentos extraídos, você pode aplicar rotinas de balanceamento, split de treino/validação/teste e data augmentation conforme as necessidades do modelo alvo.
