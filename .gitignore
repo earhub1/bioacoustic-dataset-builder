@@ -8,7 +8,8 @@ __pycache__/
 
 # Big data files
 data/audio_chunks/
-data/mfcc_chunks/
+data/results/fragments_combined/
+
 
 # Distribution / packaging
 .Python
