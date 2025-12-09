@@ -22,6 +22,7 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 
 ## Lógica de montagem
 1. **Carregamento e filtros**: todos os manifests encontrados em `--fragments-dir` são lidos e concatenados; cada linha recebe a coluna auxiliar `_manifest_dir` para resolver `snippet_path` relativo. Aplica-se então `--include-labels`/`--exclude-labels`.
+   - `snippet_path` pode ser absoluto ou relativo. Se for relativo e o caminho já existir tal como está, ele é usado diretamente; caso contrário, é resolvido em relação à pasta do manifest para evitar duplicar prefixos como `data/results/fragments/...`.
 2. **Pool por label**: o script agrupa os índices das linhas por `label`, mantendo listas de candidatos para amostragem.
 3. **Modo padrão (amostragem com reposição)**:
    - **Seleção de label**: a cada iteração, escolhe-se um label via `nothing_ratio` (função `pick_label`):

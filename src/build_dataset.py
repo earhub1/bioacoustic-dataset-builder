@@ -175,8 +175,17 @@ def ensure_output_dir(path: Path) -> None:
 
 def resolve_snippet_path(snippet: str, manifest_dir: Path) -> Path:
     path = Path(snippet)
+    # Accept absolute paths or explicit drive references (Windows), returning as-is.
     if path.is_absolute() or ":" in snippet:
         return path
+
+    # If the provided relative path already exists from the current working
+    # directory (e.g., when manifest entries include the fragments directory
+    # prefix), honor it directly to avoid duplicating the fragments dir.
+    if path.exists():
+        return path
+
+    # Fallback: treat the snippet path as relative to the manifest directory.
     return manifest_dir / path
 
 
