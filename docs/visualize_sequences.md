@@ -12,6 +12,7 @@ Esta ferramenta gera um painel de 4 faixas para cada sequência criada pelo `bui
 - `--fragments-dir`: diretório(s) com `manifest.csv` dos fragmentos (pode repetir a flag; padrão: `data/results/fragments`).
 - Filtros: `--splits` (ex.: `train val test`) e `--max-sequences` para limitar a quantidade renderizada.
 - Tempo e espectrograma: `--frame-length`, `--hop-length`, `--target-sr` alinham a conversão frame⇄tempo; `--n-fft` e `--spectrogram-hop-length` controlam a STFT da faixa de espectrograma.
+- Contenção de memória: `--max-plot-duration` recorta waveform/MFCC/máscara antes de calcular o espectrograma (útil para fitas longas) e `--viz-sr` permite downsample **apenas para visualização** (ex.: 16 kHz), reduzindo o tamanho dos arrays do espectrograma.
 - `--output-dir`: pasta onde os PNGs serão gravados (padrão: `data/results/sequence_viz`).
 
 ## Como funciona a reconstrução
@@ -44,6 +45,7 @@ Principais parâmetros adicionais:
 - `--sequence-idx-range START END`: seleciona um intervalo inclusivo de `sequence_idx` (ex.: `--sequence-idx-range 0 4`).
 - `--segment-idx` / `--segment-idx-range`: filtram apenas os segmentos desejados dentro das sequências escolhidas, por exemplo para
   destacar `segment_idx` 51 a 54 de uma fita longa.
+- Contenção de memória (iguais ao visualizador completo): `--max-plot-duration` recorta a timeline antes da STFT e `--viz-sr` faz downsample apenas para o plot.
 - `--sequence-manifest`, `--fragments-dir`, `--output-dir` e parâmetros de tempo/espectrograma seguem o mesmo significado do visualizador completo.
 
 > Caminhos no `manifest_sequences.csv` são resolvidos de forma segura: se o `sequence_path` ou `snippet_path` já for absoluto ou existir tal como está

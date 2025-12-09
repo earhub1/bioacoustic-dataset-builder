@@ -91,6 +91,21 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=512,
         help="Hop length for the spectrogram plot.",
     )
+    parser.add_argument(
+        "--max-plot-duration",
+        type=float,
+        default=None,
+        help="Optional cap (seconds) for visualization. Waveform/MFCC/mask are cropped to reduce memory.",
+    )
+    parser.add_argument(
+        "--viz-sr",
+        type=int,
+        default=None,
+        help=(
+            "Optional sample rate for plotting only. Waveform is resampled after reconstruction; "
+            "mask/MFCC remain aligned by time axes."
+        ),
+    )
     return parser.parse_args(args=args)
 
 
@@ -185,19 +200,35 @@ def plot_sequence(
     hop_length: int,
     n_fft: int,
     spectrogram_hop_length: int,
+    max_plot_duration: Optional[float],
+    viz_sr: Optional[int],
 ) -> Path:
     segments = json.loads(sequence_record["segments"])
     total_frames = int(sequence_record["total_frames"])
+    plot_frames = total_frames
+    if max_plot_duration is not None:
+        max_frames = int(max_plot_duration * (sr / float(hop_length)))
+        plot_frames = max(1, min(total_frames, max_frames))
     sequence_path = resolve_sequence_path(str(sequence_record["sequence_path"]), manifest_dir)
 
     waveform = reconstruct_waveform(
         segments=segments,
-        total_frames=total_frames,
+        total_frames=plot_frames,
         meta_map=meta_map,
         sr=sr,
         frame_length=frame_length,
         hop_length=hop_length,
     )
+
+    if max_plot_duration is not None:
+        max_samples = int(max_plot_duration * sr)
+        waveform = waveform[:max_samples]
+
+    # Optional downsample just for visualization
+    plot_sr = sr
+    if viz_sr is not None and viz_sr > 0 and viz_sr != sr and len(waveform) > 0:
+        waveform = librosa.resample(waveform, orig_sr=sr, target_sr=viz_sr)
+        plot_sr = viz_sr
 
     # Compute spectrogram for visualization.
     spec = np.abs(librosa.stft(waveform, n_fft=n_fft, hop_length=spectrogram_hop_length))
@@ -205,17 +236,21 @@ def plot_sequence(
 
     # Load stored MFCCs for the assembled sequence.
     mfcc = np.load(sequence_path)
+    mfcc = mfcc[:, :plot_frames]
 
     # Binary mask (frames) for Nothing vs outras classes.
-    mask = np.zeros(total_frames, dtype=int)
+    mask = np.zeros(plot_frames, dtype=int)
     for seg in segments:
         start = int(seg["start_frame"])
         end = int(seg["end_frame"])
+        if start >= plot_frames:
+            continue
+        end = min(end, plot_frames)
         value = 0 if seg["label"] == "Nothing" else 1
         mask[start:end] = value
 
-    time_wave = np.arange(len(waveform)) / float(sr)
-    time_mask = np.arange(total_frames) * (hop_length / float(sr))
+    time_wave = np.arange(len(waveform)) / float(plot_sr)
+    time_mask = np.arange(plot_frames) * (hop_length / float(sr))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=False)
@@ -228,7 +263,7 @@ def plot_sequence(
         spec_db,
         origin="lower",
         aspect="auto",
-        extent=[time_wave[0] if len(time_wave) else 0, time_wave[-1] if len(time_wave) else 0, 0, sr / 2],
+        extent=[time_wave[0] if len(time_wave) else 0, time_wave[-1] if len(time_wave) else 0, 0, plot_sr / 2],
         cmap="magma",
     )
     axes[1].set_title("Spectrogram (dB)")
@@ -284,6 +319,8 @@ def main(cli_args: Optional[Sequence[str]] = None) -> None:
             hop_length=args.hop_length,
             n_fft=args.n_fft,
             spectrogram_hop_length=args.spectrogram_hop_length,
+            max_plot_duration=args.max_plot_duration,
+            viz_sr=args.viz_sr,
         )
         logger.info("Saved visualization to %s", out_path)
 
