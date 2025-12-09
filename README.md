@@ -112,7 +112,8 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
    ```
 6. **Saídas**:
    - Sequências salvas como `.npy` em `data/results/sequences/{train,val,test}/sequence_<n>.npy`.
-   - `manifest_sequences.csv` na raiz de `data/results/sequences` com uma coluna `split` indicando o destino e manifests por split em cada subpasta, contendo `sequence_path`, `total_duration_s`, `total_frames`, `n_segments`, `seed`, contadores de fragmentos descartados ou truncados (`skipped_too_long`, `fragment_limit_reached`, `truncated_segments`), `pack_all_mode` para identificar fitas geradas sem reposição, `split` e uma coluna `segments` (JSON) com a ordem, rótulo, posição (frames/segundos) e se cada fragmento foi truncado.
+   - `manifest_sequences_summary.csv` na raiz de `data/results/sequences` e por split, com uma linha por fita: `sequence_path`, `sequence_idx`, `split`, `total_duration_s`, `total_frames`, `n_segments`, `seed`, `skipped_too_long`, `fragment_limit_reached`, `truncated_segments`, `pack_all_mode`.
+   - `manifest_sequences.csv` (manifesto por segmento) na raiz de `data/results/sequences` e por split, com uma linha por trecho usado: `sequence_path`, `sequence_idx`, `split`, `segment_idx`, `label`, `snippet_path`, `start_frame`, `end_frame`, `duration_frames`, `start_s`, `end_s`, `duration_s`, `truncated`.
 7. **(Opcional) Visualizar sequências**: execute `python src/visualize_sequences.py --sequence-manifest data/results/sequences/manifest_sequences.csv --fragments-dir data/results/fragments_combined --output-dir data/results/sequence_viz --splits train val` para gerar PNGs com waveform reconstruído, espectrograma, MFCC armazenado e uma máscara binária (0 = Nothing, 1 = demais classes). Consulte `docs/visualize_sequences.md` (e o resumo em `docs/build_dataset.md`) para mais detalhes.
 
 ## Próximos passos

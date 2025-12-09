@@ -40,17 +40,9 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 
 ## Saídas
 - **Sequências**: salvas como `.npy` em subpastas de split sob `--output-dir` (padrão `data/results/sequences/{train,val,test}`) com o padrão `sequence_<n>.npy`. Cada arquivo contém um tensor de features concatenadas (mesma dimensão de frequência dos fragmentos de entrada).
-- **Manifesto de sequências** (`manifest_sequences.csv`): salvo no diretório raiz de `--output-dir`, com uma coluna `split` indicando o destino (`train`, `val` ou `test`). Um manifesto separado é salvo em cada subpasta de split, contendo apenas as sequências daquele conjunto. Cada linha descreve uma sequência gerada com as colunas:
-  - `sequence_path`: caminho para o `.npy` salvo.
-  - `total_frames` / `total_duration_s`: frames e duração total da sequência.
-  - `n_segments`: quantidade de fragmentos concatenados.
-  - `segments`: JSON com a lista ordenada dos trechos incluídos, contendo `label`, `snippet_path`, `start_frame`, `end_frame`, `start_s`, `end_s` e `truncated` para cada segmento.
-  - `seed`: valor usado para a amostragem reprodutível.
-  - `skipped_too_long`: quantos fragmentos foram descartados por excederem o orçamento restante sem `--allow-partial-fragments`.
-  - `fragment_limit_reached`: indica se a sequência encerrou por atingir `--max-fragments-per-sequence`.
-  - `truncated_segments`: quantos segmentos foram cortados na etapa final de truncamento.
-  - `pack_all_mode`: `True` quando a fita foi criada no modo exaustivo (todos os fragments consumidos sem reposição e alocação por orçamento de frames), `False` no modo padrão de amostragem.
-  - `split`: conjunto destino da sequência.
+- **Manifestos**:
+  - `manifest_sequences_summary.csv`: resumo por fita, salvo na raiz de `--output-dir` (e em cada subpasta de split). Colunas: `sequence_path`, `sequence_idx`, `split`, `total_frames`, `total_duration_s`, `n_segments`, `pack_all_mode`, `seed`, `skipped_too_long`, `fragment_limit_reached`, `truncated_segments`.
+  - `manifest_sequences.csv`: manifesto detalhado por **segmento**, salvo na raiz (e por split). Cada linha indica um trecho dentro de uma sequência com: `sequence_path`, `sequence_idx`, `split`, `segment_idx`, `label`, `snippet_path`, `start_frame`, `end_frame`, `duration_frames`, `start_s`, `end_s`, `duration_s`, `truncated`. Esse formato gera uma linha por trecho, facilitando auditoria e análises posteriores.
 
 ## Exemplos de uso
 ### Modo padrão (amostragem)

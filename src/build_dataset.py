@@ -9,7 +9,6 @@ sampling.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -370,21 +369,49 @@ def save_sequence(
     frame_length: int,
     hop_length: int,
     split: str,
-    ) -> dict:
+    pack_all_mode: bool,
+    seed: int,
+) -> tuple[dict, List[dict]]:
     ensure_output_dir(output_dir)
     seq_path = output_dir / f"sequence_{sequence_idx}.npy"
     np.save(seq_path, features)
 
     total_frames = int(features.shape[1])
     total_duration_s = frames_to_seconds(total_frames, sr, frame_length, hop_length)
-    return {
+
+    summary_record = {
         "sequence_path": str(seq_path),
+        "sequence_idx": sequence_idx,
+        "split": split,
         "total_frames": total_frames,
         "total_duration_s": total_duration_s,
         "n_segments": len(segments),
-        "segments": json.dumps(segments),
-        "split": split,
+        "pack_all_mode": pack_all_mode,
+        "seed": seed,
     }
+
+    segment_records: List[dict] = []
+    for seg_idx, seg in enumerate(segments):
+        duration_frames = int(seg["end_frame"] - seg["start_frame"])
+        segment_records.append(
+            {
+                "sequence_path": str(seq_path),
+                "sequence_idx": sequence_idx,
+                "split": split,
+                "segment_idx": seg_idx,
+                "label": seg["label"],
+                "snippet_path": seg["snippet_path"],
+                "start_frame": int(seg["start_frame"]),
+                "end_frame": int(seg["end_frame"]),
+                "duration_frames": duration_frames,
+                "start_s": seg.get("start_s", frames_to_seconds(seg["start_frame"], sr, frame_length, hop_length)),
+                "end_s": seg.get("end_s", frames_to_seconds(seg["end_frame"], sr, frame_length, hop_length)),
+                "duration_s": frames_to_seconds(duration_frames, sr, frame_length, hop_length),
+                "truncated": bool(seg.get("truncated", False)),
+            }
+        )
+
+    return summary_record, segment_records
 
 
 def allocate_fragments_by_split(
@@ -465,7 +492,8 @@ def build_sequences_pack_all(
     )
 
     ensure_output_dir(args.output_dir)
-    records: List[dict] = []
+    summary_records: List[dict] = []
+    segment_records: List[dict] = []
     sequence_idx = 0
 
     for split in split_labels:
@@ -485,7 +513,7 @@ def build_sequences_pack_all(
             features, seq_segments, truncated_segments = finalize_sequence_chunks(
                 chunks, segments, args.target_sr, args.frame_length, args.hop_length
             )
-            record = save_sequence(
+            summary_record, segment_list = save_sequence(
                 output_dir=split_dir,
                 sequence_idx=sequence_idx,
                 features=features,
@@ -494,17 +522,18 @@ def build_sequences_pack_all(
                 frame_length=args.frame_length,
                 hop_length=args.hop_length,
                 split=split,
+                pack_all_mode=True,
+                seed=args.seed,
             )
-            record.update(
+            summary_record.update(
                 {
-                    "seed": args.seed,
                     "skipped_too_long": 0,
                     "fragment_limit_reached": False,
                     "truncated_segments": truncated_segments,
-                    "pack_all_mode": True,
                 }
             )
-            records.append(record)
+            summary_records.append(summary_record)
+            segment_records.extend(segment_list)
             sequence_idx += 1
             chunks = []
             segments = []
@@ -544,21 +573,32 @@ def build_sequences_pack_all(
 
         flush_sequence()
 
-    manifest = pd.DataFrame(records)
-    manifest_path = args.output_dir / "manifest_sequences.csv"
-    manifest.to_csv(manifest_path, index=False)
-    logger.info("Saved %d sequences to %s", len(manifest), manifest_path)
+    summary_df = pd.DataFrame(summary_records)
+    segments_df = pd.DataFrame(segment_records)
+
+    summary_path = args.output_dir / "manifest_sequences_summary.csv"
+    summary_df.to_csv(summary_path, index=False)
+    logger.info("Saved %d sequence summaries to %s", len(summary_df), summary_path)
+
+    segment_path = args.output_dir / "manifest_sequences.csv"
+    segments_df.to_csv(segment_path, index=False)
+    logger.info("Saved %d sequence segments to %s", len(segments_df), segment_path)
 
     for split in split_labels:
-        split_df = manifest[manifest["split"] == split]
-        if split_df.empty:
-            continue
-        split_manifest_path = args.output_dir / split / "manifest_sequences.csv"
-        ensure_output_dir(split_manifest_path.parent)
-        split_df.to_csv(split_manifest_path, index=False)
-        logger.info("Saved %d %s sequences to %s", len(split_df), split, split_manifest_path)
+        split_summary = summary_df[summary_df["split"] == split]
+        split_segments = segments_df[segments_df["split"] == split]
+        if not split_summary.empty:
+            split_summary_path = args.output_dir / split / "manifest_sequences_summary.csv"
+            ensure_output_dir(split_summary_path.parent)
+            split_summary.to_csv(split_summary_path, index=False)
+            logger.info("Saved %d %s sequence summaries to %s", len(split_summary), split, split_summary_path)
+        if not split_segments.empty:
+            split_segment_path = args.output_dir / split / "manifest_sequences.csv"
+            ensure_output_dir(split_segment_path.parent)
+            split_segments.to_csv(split_segment_path, index=False)
+            logger.info("Saved %d %s sequence segments to %s", len(split_segments), split, split_segment_path)
 
-    return manifest
+    return summary_df
 
 
 def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
@@ -589,7 +629,8 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     if target_frames <= 0:
         raise ValueError("sequence-duration must be positive.")
 
-    records: List[dict] = []
+    summary_records: List[dict] = []
+    segment_records: List[dict] = []
 
     for seq_idx in range(args.num_sequences):
         features, segments, meta = build_sequence(
@@ -607,7 +648,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
         split = rng.choice(split_labels, p=split_probs)
         split_dir = args.output_dir / split
 
-        record = save_sequence(
+        summary_record, seq_segments = save_sequence(
             output_dir=split_dir,
             sequence_idx=seq_idx,
             features=features,
@@ -616,33 +657,45 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             frame_length=args.frame_length,
             hop_length=args.hop_length,
             split=split,
+            pack_all_mode=False,
+            seed=args.seed,
         )
-        record.update(
+        summary_record.update(
             {
-                "seed": args.seed,
                 "skipped_too_long": meta["skipped_too_long"],
                 "fragment_limit_reached": meta["fragment_limit_reached"],
                 "truncated_segments": meta["truncated_segments"],
-                "pack_all_mode": False,
             }
         )
-        records.append(record)
+        summary_records.append(summary_record)
+        segment_records.extend(seq_segments)
 
-    manifest = pd.DataFrame(records)
+    summary_df = pd.DataFrame(summary_records)
+    segments_df = pd.DataFrame(segment_records)
     ensure_output_dir(args.output_dir)
-    manifest_path = args.output_dir / "manifest_sequences.csv"
-    manifest.to_csv(manifest_path, index=False)
-    logger.info("Saved %d sequences to %s", len(manifest), manifest_path)
+
+    summary_path = args.output_dir / "manifest_sequences_summary.csv"
+    summary_df.to_csv(summary_path, index=False)
+    logger.info("Saved %d sequence summaries to %s", len(summary_df), summary_path)
+
+    segment_path = args.output_dir / "manifest_sequences.csv"
+    segments_df.to_csv(segment_path, index=False)
+    logger.info("Saved %d sequence segments to %s", len(segments_df), segment_path)
 
     for split in split_labels:
-        split_df = manifest[manifest["split"] == split]
-        if split_df.empty:
-            continue
-        split_manifest_path = args.output_dir / split / "manifest_sequences.csv"
-        ensure_output_dir(split_manifest_path.parent)
-        split_df.to_csv(split_manifest_path, index=False)
-        logger.info("Saved %d %s sequences to %s", len(split_df), split, split_manifest_path)
-    return manifest
+        split_summary = summary_df[summary_df["split"] == split]
+        split_segments = segments_df[segments_df["split"] == split]
+        if not split_summary.empty:
+            split_summary_path = args.output_dir / split / "manifest_sequences_summary.csv"
+            ensure_output_dir(split_summary_path.parent)
+            split_summary.to_csv(split_summary_path, index=False)
+            logger.info("Saved %d %s sequence summaries to %s", len(split_summary), split, split_summary_path)
+        if not split_segments.empty:
+            split_segment_path = args.output_dir / split / "manifest_sequences.csv"
+            ensure_output_dir(split_segment_path.parent)
+            split_segments.to_csv(split_segment_path, index=False)
+            logger.info("Saved %d %s sequence segments to %s", len(split_segments), split, split_segment_path)
+    return summary_df
 
 
 def main(cli_args: Optional[Sequence[str]] = None) -> None:
