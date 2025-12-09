@@ -75,4 +75,4 @@ python src/build_dataset.py \
 Neste modo, cada fragmento é usado exatamente uma vez, os frames totais são divididos pelos splits segundo o orçamento 70/20/10, e novas sequências são abertas a cada ~30 s (em frames). Se você omitir `--max-sequence-duration`, o script produzirá uma única sequência por split com todos os frames atribuídos e registrará `pack_all_mode=True` no manifesto.
 
 ## Visualização
-As ferramentas de visualização serão redesenhadas. Por enquanto, baseie-se nos manifestos gerados (`manifest_sequences.csv` e manifestos por split) para conferir a composição das fitas.
+Para visualizar rapidamente o colormesh das sequências salvas, use `visualize_sequence_colormesh.py`, que lê o `manifest_sequences.csv` segmentado e plota apenas o tensor (freq x frames) com eixo de tempo em segundos (10 fps com os defaults `hop_length=6400`, `target_sr=64000`). É possível filtrar por `sequence_idx`, `segment_idx`, split e limitar a janela com `--max-plot-duration`. Consulte `docs/visualize_sequences.md` para o passo a passo.
