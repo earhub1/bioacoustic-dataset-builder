@@ -86,7 +86,7 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
 1. **Escolha os fragmentos de entrada**: defina os diretórios com `manifest.csv` resultantes da extração (padrão: `data/results/fragments`). Use `--fragments-dir` múltiplas vezes se quiser combinar fontes.
 2. **Filtre labels**: por padrão, `NI` é excluído. Para incluir/excluir explicitamente, use `--include-labels` e/ou `--exclude-labels`.
 3. **Defina duração, balanceamento e splits**: use `--sequence-duration` para a duração alvo (s) e `--nothing-ratio` para controlar a razão Nothing:eventos (ex.: 1.0 ≈ 1:1 quando ambos existem). Ajuste `--num-sequences` para quantas fitas deseja. Se precisar limitar quantos trechos entram em cada sequência, use `--max-fragments-per-sequence`; para aceitar fragmentos maiores que o orçamento restante, ative `--allow-partial-fragments` (por padrão eles são descartados e um novo trecho é sorteado). Controle o split de saída com `--train-ratio`, `--val-ratio` e `--test-ratio` (padrão 0.7/0.15/0.15); as sequências serão gravadas em subpastas `train/`, `val/` e `test` sob `--output-dir`.
-4. **Gere as sequências**:
+4. **Gere as sequências (modo padrão)**:
    ```bash
   python src/build_dataset.py \
     --fragments-dir data/results/fragments_combined \
@@ -95,14 +95,25 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
   --nothing-ratio 0.8 \
   --num-sequences 20 \
     --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1 \
- --max-fragments-per-sequence 8 \
- --output-dir data/results/sequences \
- --seed 7
+  --max-fragments-per-sequence 8 \
+  --output-dir data/results/sequences \
+  --seed 7
   ```
-5. **Saídas**:
+5. **(Opcional) Modo exaustivo**: se quiser usar todos os fragmentos uma única vez, sem reposição, e alocar frames por orçamento de split, execute com `--pack-all-fragments`. Inclua `--max-sequence-duration` para abrir novas fitas quando a atual atingir esse limite; se omitir, será gerada uma única sequência por split com todos os frames atribuídos. Exemplo:
+   ```bash
+   python src/build_dataset.py \
+     --fragments-dir data/results/fragments_combined \
+     --exclude-labels NI \
+     --pack-all-fragments \
+     --max-sequence-duration 30 \
+     --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1 \
+     --output-dir data/results/sequences_pack_all \
+     --seed 7
+   ```
+6. **Saídas**:
    - Sequências salvas como `.npy` em `data/results/sequences/{train,val,test}/sequence_<n>.npy`.
-   - `manifest_sequences.csv` na raiz de `data/results/sequences` com uma coluna `split` indicando o destino e manifests por split em cada subpasta, contendo `sequence_path`, `total_duration_s`, `total_frames`, `n_segments`, `seed`, contadores de fragmentos descartados ou truncados (`skipped_too_long`, `fragment_limit_reached`, `truncated_segments`), `split` e uma coluna `segments` (JSON) com a ordem, rótulo, posição (frames/segundos) e se cada fragmento foi truncado.
-6. **(Opcional) Visualizar sequências**: execute `python src/visualize_sequences.py --sequence-manifest data/results/sequences/manifest_sequences.csv --fragments-dir data/results/fragments_combined --output-dir data/results/sequence_viz --splits train val` para gerar PNGs com waveform reconstruído, espectrograma, MFCC armazenado e uma máscara binária (0 = Nothing, 1 = demais classes). Consulte `docs/visualize_sequences.md` (e o resumo em `docs/build_dataset.md`) para mais detalhes.
+   - `manifest_sequences.csv` na raiz de `data/results/sequences` com uma coluna `split` indicando o destino e manifests por split em cada subpasta, contendo `sequence_path`, `total_duration_s`, `total_frames`, `n_segments`, `seed`, contadores de fragmentos descartados ou truncados (`skipped_too_long`, `fragment_limit_reached`, `truncated_segments`), `pack_all_mode` para identificar fitas geradas sem reposição, `split` e uma coluna `segments` (JSON) com a ordem, rótulo, posição (frames/segundos) e se cada fragmento foi truncado.
+7. **(Opcional) Visualizar sequências**: execute `python src/visualize_sequences.py --sequence-manifest data/results/sequences/manifest_sequences.csv --fragments-dir data/results/fragments_combined --output-dir data/results/sequence_viz --splits train val` para gerar PNGs com waveform reconstruído, espectrograma, MFCC armazenado e uma máscara binária (0 = Nothing, 1 = demais classes). Consulte `docs/visualize_sequences.md` (e o resumo em `docs/build_dataset.md`) para mais detalhes.
 
 ## Próximos passos
 - A partir dos fragmentos extraídos, você pode aplicar rotinas de balanceamento, split de treino/validação/teste e data augmentation conforme as necessidades do modelo alvo.
