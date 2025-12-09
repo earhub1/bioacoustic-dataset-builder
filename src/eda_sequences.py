@@ -132,41 +132,36 @@ def summarize_overall_frames(grouped: pd.DataFrame) -> pd.DataFrame:
     return overall
 
 
-def plot_split_bars(grouped: pd.DataFrame, output_dir: Path, show: bool) -> List[Path]:
-    paths: List[Path] = []
-    for split, split_df in grouped.groupby("split"):
-        fig, ax = plt.subplots(figsize=(8, max(3, 0.4 * len(split_df))))
-        ax.barh(split_df["label"], split_df["frames"], color="#4C72B0")
-        ax.invert_yaxis()
-        ax.set_xlabel("Frames")
-        ax.set_title(f"Frames by label — {split}")
+def plot_split_label_bars(grouped: pd.DataFrame, output_dir: Path, show: bool) -> Path:
+    pivot = grouped.pivot(index="split", columns="label", values="frames").fillna(0)
+    pivot = pivot.sort_index()
 
-        for i, (frames, frac) in enumerate(
-            zip(split_df["frames"], split_df["frame_fraction"])
-        ):
-            ax.text(frames, i, f" {frames:,} ({frac:.1%})", va="center", ha="left")
-
-        plt.tight_layout()
-        path = output_dir / f"frames_by_label_{split}.png"
-        fig.savefig(path, dpi=200)
-        paths.append(path)
-        if show:
-            plt.show()
-        plt.close(fig)
-    return paths
-
-
-def plot_stacked_by_label(grouped: pd.DataFrame, output_dir: Path, show: bool) -> Path:
-    pivot = grouped.pivot(index="label", columns="split", values="frames").fillna(0)
-    pivot = pivot.sort_values(pivot.columns.tolist(), ascending=False)
-
-    ax = pivot.plot(kind="bar", stacked=True, figsize=(9, max(3, 0.5 * len(pivot))), colormap="tab20")
+    ax = pivot.plot(kind="bar", figsize=(9, 5), width=0.75)
     ax.set_ylabel("Frames")
-    ax.set_title("Frame distribution by label and split")
-    ax.legend(title="Split")
-    plt.tight_layout()
+    ax.set_xlabel("Split")
+    ax.set_title("Frames por label em cada split")
+    ax.legend(title="Label")
 
-    path = output_dir / "frames_by_label_split_stacked.png"
+    # Annotate each bar with absolute frames and split-relative percentage.
+    for container in ax.containers:
+        for bar, split in zip(container, pivot.index):
+            height = bar.get_height()
+            if height <= 0:
+                continue
+            split_total = pivot.loc[split].sum()
+            frac = height / split_total if split_total else 0
+            ax.annotate(
+                f"{int(height):,}\n({frac:.1%})",
+                xy=(bar.get_x() + bar.get_width() / 2, height),
+                xytext=(0, 4),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+
+    plt.tight_layout()
+    path = output_dir / "frames_by_label_split.png"
     plt.savefig(path, dpi=200)
     if show:
         plt.show()
@@ -193,10 +188,8 @@ def main(args: Optional[List[str]] = None) -> None:
     logger.info("Wrote split summary to %s", frames_csv)
     logger.info("Wrote overall summary to %s", overall_csv)
 
-    split_plots = plot_split_bars(grouped, parsed.output_dir, parsed.show)
-    stacked_plot = plot_stacked_by_label(grouped, parsed.output_dir, parsed.show)
-    logger.info("Saved split plots: %s", ", ".join(str(p) for p in split_plots))
-    logger.info("Saved stacked plot: %s", stacked_plot)
+    split_plot = plot_split_label_bars(grouped, parsed.output_dir, parsed.show)
+    logger.info("Saved split plot: %s", split_plot)
 
 
 if __name__ == "__main__":
