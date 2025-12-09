@@ -1,9 +1,9 @@
 """Lightweight sequence colormesh visualizer.
 
-This tool plots the saved sequence tensor (freq x frames) as a single
-pcolormesh, using the hop length and target sample rate to derive
-the time axis in seconds (~10 fps by default with hop_length=6400 and
-sr=64000).
+This tool plots the saved sequence tensor (freq x frames) alongside a
+binary mask (Nothing vs. outras classes). It uses the hop length and
+target sample rate to derive the time axis in seconds (~10 fps by
+default with hop_length=6400 and sr=64000).
 """
 from __future__ import annotations
 
@@ -115,18 +115,39 @@ def plot_sequence(seq_path: Path, seq_rows: pd.DataFrame, args: argparse.Namespa
         logging.warning("No data to plot for %s after slicing", seq_path)
         return None
 
+    mask = np.zeros(window.shape[1], dtype=float)
+    for _, seg in filtered_rows.iterrows():
+        seg_label = str(seg.get("label", ""))
+        seg_start = int(seg.get("start_frame", 0))
+        seg_end = int(seg.get("end_frame", 0))
+        seg_end = min(seg_end, end_frame)
+        seg_start = max(seg_start, start_frame)
+        if seg_end <= seg_start:
+            continue
+        rel_start = seg_start - start_frame
+        rel_end = seg_end - start_frame
+        if seg_label and seg_label != "Nothing":
+            mask[rel_start:rel_end] = 1.0
+
     time_axis = (np.arange(window.shape[1]) + start_frame) * (args.hop_length / args.target_sr)
     freq_axis = np.arange(window.shape[0])
 
     split = seq_rows["split"].iloc[0] if "split" in seq_rows else "unknown"
     seq_idx = int(seq_rows["sequence_idx"].iloc[0])
 
-    fig, ax = plt.subplots(figsize=(10, 4))
-    mesh = ax.pcolormesh(time_axis, freq_axis, window, shading="auto", cmap="magma")
-    fig.colorbar(mesh, ax=ax, label="Feature value")
-    ax.set_xlabel("Tempo (s)")
-    ax.set_ylabel("Bin de frequência/coeficiente")
-    ax.set_title(f"Sequência {seq_idx} ({split}) | frames {start_frame}-{end_frame}")
+    fig, (ax_feat, ax_mask) = plt.subplots(nrows=2, figsize=(10, 6), sharex=True, gridspec_kw={"height_ratios": [4, 1]})
+
+    mesh = ax_feat.pcolormesh(time_axis, freq_axis, window, shading="auto", cmap="magma")
+    fig.colorbar(mesh, ax=ax_feat, label="Feature value")
+    ax_feat.set_ylabel("Bin de frequência/coeficiente")
+    ax_feat.set_title(f"Sequência {seq_idx} ({split}) | frames {start_frame}-{end_frame}")
+
+    ax_mask.step(time_axis, mask, where="post", color="tab:blue")
+    ax_mask.set_xlabel("Tempo (s)")
+    ax_mask.set_ylabel("Evento")
+    ax_mask.set_yticks([0, 1])
+    ax_mask.set_yticklabels(["Nothing", "Outro"])
+    ax_mask.set_ylim(-0.1, 1.1)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     suffix = ""

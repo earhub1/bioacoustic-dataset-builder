@@ -25,7 +25,8 @@ quando já existe e, caso contrário, tenta resolvê-lo em relação ao diretór
    correspondente; `--max-plot-duration` pode encurtar ainda mais a janela.
 3. Carrega o `.npy` da sequência, recorta a janela escolhida e cria o eixo de tempo em segundos
    (`frames * hop_length / target_sr`).
-4. Plota um único painel Matplotlib com `pcolormesh`, rotulando o tempo em segundos e o eixo vertical como bin/coefficient.
+4. Plota dois painéis: (a) `pcolormesh` do tensor (freq x frames) e (b) uma máscara binária Nothing (0) vs. outras classes (1)
+   derivada dos intervalos listados no manifesto.
 5. Salva um PNG por sequência selecionada em `--output-dir`, nomeando pelo índice e pelo split.
 
 ## Exemplo de uso
