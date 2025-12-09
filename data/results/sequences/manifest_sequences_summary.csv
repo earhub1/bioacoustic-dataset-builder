@@ -1,0 +1,4 @@
+sequence_path,sequence_idx,split,total_frames,total_duration_s,n_segments,pack_all_mode,seed,skipped_too_long,fragment_limit_reached,truncated_segments
+data\results\sequences\train\sequence_0.npy,0,train,604007,60400.7,3023,True,42,0,False,0
+data\results\sequences\val\sequence_1.npy,1,val,173075,17307.5,894,True,42,0,False,0
+data\results\sequences\test\sequence_2.npy,2,test,85407,8540.7,423,True,42,0,False,0
