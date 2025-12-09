@@ -137,16 +137,18 @@ def plot_sequence(seq_path: Path, seq_rows: pd.DataFrame, args: argparse.Namespa
 
     fig, (ax_feat, ax_mask) = plt.subplots(nrows=2, figsize=(10, 6), sharex=True, gridspec_kw={"height_ratios": [4, 1]})
 
-    mesh = ax_feat.pcolormesh(time_axis, freq_axis, window, shading="auto", cmap="magma")
-    fig.colorbar(mesh, ax=ax_feat, label="Feature value")
-    ax_feat.set_ylabel("Bin de frequência/coeficiente")
-    ax_feat.set_title(f"Sequência {seq_idx} ({split}) | frames {start_frame}-{end_frame}")
-
+    mesh = ax_feat.pcolormesh(time_axis, freq_axis, window, shading="auto", cmap="jet")
+    #fig.colorbar(mesh, ax=ax_feat, label="Feature value")
+    # climits can be adjusted if needed
+    mesh.set_clim(vmin=-70, vmax=50)
+    ax_feat.set_ylabel("Frequency Bin")
+    ax_feat.set_title(f"Split {seq_idx} ({split}) | frames {start_frame}-{end_frame}")
+    
     ax_mask.step(time_axis, mask, where="post", color="tab:blue")
-    ax_mask.set_xlabel("Tempo (s)")
-    ax_mask.set_ylabel("Evento")
+    ax_mask.set_xlabel("Time (s)")
+    ax_mask.set_ylabel("Event")
     ax_mask.set_yticks([0, 1])
-    ax_mask.set_yticklabels(["Nothing", "Outro"])
+    ax_mask.set_yticklabels(["Nothing", "G01"])
     ax_mask.set_ylim(-0.1, 1.1)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
