@@ -118,3 +118,6 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
 
 ## Próximos passos
 - A partir dos fragmentos extraídos, você pode aplicar rotinas de balanceamento, split de treino/validação/teste e data augmentation conforme as necessidades do modelo alvo.
+- Para um pontapé inicial de classificação binária frame a frame (MLP simples
+  com contexto de 2 frames, totalizando 27 entradas), consulte
+  `docs/model_mlp.md`.
