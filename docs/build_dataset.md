@@ -74,25 +74,5 @@ python src/build_dataset.py \
 
 Neste modo, cada fragmento é usado exatamente uma vez, os frames totais são divididos pelos splits segundo o orçamento 70/20/10, e novas sequências são abertas a cada ~30 s (em frames). Se você omitir `--max-sequence-duration`, o script produzirá uma única sequência por split com todos os frames atribuídos e registrará `pack_all_mode=True` no manifesto.
 
-## Visualizar sequências geradas (opcional)
-Use `src/visualize_sequences.py` para inspecionar cada fita sintética. O script reconstrói a linha do tempo aproximada em áudio usando as anotações do manifesto de fragmentos e gera um subplot com quatro faixas: waveform reconstituído, espectrograma, MFCC armazenado e máscara binária (0 = Nothing, 1 = demais classes). Veja mais detalhes e exemplos em `docs/visualize_sequences.md`.
-
-Entradas principais:
-- `--sequence-manifest`: caminho para o `manifest_sequences.csv` produzido pelo builder (padrão: `data/results/sequences/manifest_sequences.csv`).
-- `--fragments-dir`: um ou mais diretórios contendo os fragmentos originais e respectivos `manifest.csv` (padrão: `data/results/fragments`).
-- Filtros: `--splits` para focar em `train/val/test` específicos e `--max-sequences` para limitar quantos arquivos são renderizados.
-- Parâmetros de tempo: `--frame-length`, `--hop-length`, `--target-sr` para alinhar os eixos de tempo; `--n-fft` e `--spectrogram-hop-length` para o espectrograma.
-
-Exemplo:
-```bash
-python src/visualize_sequences.py \
-  --sequence-manifest data/results/sequences/manifest_sequences.csv \
-  --fragments-dir data/results/fragments_combined \
-  --splits train val \
-  --max-sequences 3 \
-  --output-dir data/results/sequence_viz
-```
-
-Saídas:
-- PNGs em `--output-dir`, um por sequência (`sequence_<n>.png`).
-- Cada figura inclui: (1) waveform reconstruído somando os trechos originais na posição indicada; (2) espectrograma (dB); (3) MFCC da sequência (carregado do `.npy` da sequência); (4) máscara binária que marca `Nothing` como 0 e demais classes como 1.
+## Visualização
+As ferramentas de visualização serão redesenhadas. Por enquanto, baseie-se nos manifestos gerados (`manifest_sequences.csv` e manifestos por split) para conferir a composição das fitas.
