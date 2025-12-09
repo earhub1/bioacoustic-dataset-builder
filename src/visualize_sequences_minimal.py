@@ -62,6 +62,21 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Inclusive range of sequence_idx values to render (e.g., 0 4).",
     )
     parser.add_argument(
+        "--segment-idx",
+        action="append",
+        type=int,
+        default=None,
+        help="Segment indices to render within the selected sequences (can repeat).",
+    )
+    parser.add_argument(
+        "--segment-idx-range",
+        nargs=2,
+        type=int,
+        default=None,
+        metavar=("START", "END"),
+        help="Inclusive range of segment_idx values to render (e.g., 10 25).",
+    )
+    parser.add_argument(
         "--splits",
         nargs="+",
         default=None,
@@ -114,6 +129,18 @@ def collect_sequence_indices(args: argparse.Namespace) -> set[int]:
         start, end = args.sequence_idx_range
         if end < start:
             raise ValueError("END must be >= START in --sequence-idx-range")
+        indices.update(range(start, end + 1))
+    return indices
+
+
+def collect_segment_indices(args: argparse.Namespace) -> set[int]:
+    indices: set[int] = set()
+    if args.segment_idx:
+        indices.update(args.segment_idx)
+    if args.segment_idx_range:
+        start, end = args.segment_idx_range
+        if end < start:
+            raise ValueError("END must be >= START in --segment-idx-range")
         indices.update(range(start, end + 1))
     return indices
 
@@ -222,6 +249,10 @@ def main(cli_args: Optional[Sequence[str]] = None) -> None:
     selected_indices = collect_sequence_indices(args)
     if selected_indices:
         seq_manifest = seq_manifest[seq_manifest["sequence_idx"].isin(selected_indices)]
+
+    segment_indices = collect_segment_indices(args)
+    if segment_indices:
+        seq_manifest = seq_manifest[seq_manifest["segment_idx"].isin(segment_indices)]
 
     if seq_manifest.empty:
         raise ValueError("No sequence segments found after applying filters.")

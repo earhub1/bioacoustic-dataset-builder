@@ -42,6 +42,8 @@ Para gerar figuras apenas de sequências específicas (útil em artigos ou relat
 Principais parâmetros adicionais:
 - `--sequence-idx`: pode ser repetido para listar índices de sequência a renderizar (ex.: `--sequence-idx 0 --sequence-idx 3`).
 - `--sequence-idx-range START END`: seleciona um intervalo inclusivo de `sequence_idx` (ex.: `--sequence-idx-range 0 4`).
+- `--segment-idx` / `--segment-idx-range`: filtram apenas os segmentos desejados dentro das sequências escolhidas, por exemplo para
+  destacar `segment_idx` 51 a 54 de uma fita longa.
 - `--sequence-manifest`, `--fragments-dir`, `--output-dir` e parâmetros de tempo/espectrograma seguem o mesmo significado do visualizador completo.
 
 Exemplo (gera apenas as sequências 0 e 2 do split train):
