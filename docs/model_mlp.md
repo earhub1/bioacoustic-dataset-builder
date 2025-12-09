@@ -40,6 +40,35 @@ atual, mais 9 do frame anterior e 9 do frame anterior do anterior.
 5. **Pós-treino**: escolha o limiar de decisão usando a curva precision–recall
    na validação para equilibrar precisão e recall da classe G01.
 
+## Lidando com desbalanceamento
+- **Como obter pesos** (frames → perdas ou amostragem):
+  - Some os `duration_frames` por `label` dentro de cada `split` a partir de
+    `manifest_sequences.csv` (ou use `split_total_frames` do
+    `manifest_sequences_summary.csv` para conferir os totais).
+  - Para uma BCE binária (Nothing=0, G01=1), defina `pos_weight =
+    frames_nothing / frames_g01` no split de treino. Em PyTorch, passe
+    `pos_weight` em `BCEWithLogitsLoss`. Em `CrossEntropyLoss`, use
+    `weight=[w_nothing, w_g01]` normalizados.
+  - Se preferir balancear via amostragem, calcule o peso por frame (ou por
+    segmento) como `1 / frames_por_label[label]` e use `WeightedRandomSampler`
+    no DataLoader de treino.
+- **Escolha da técnica**:
+  - *Perda ponderada* é a opção mais simples e estável; boa quando o dataset é
+    fixo e bem amostrado.
+  - *Sampler balanceado* ajuda quando a classe minoritária tem poucas instâncias
+    distintas e você quer vê-las com mais frequência por época.
+  - *Focal loss* (ex.: `gamma` 1–2) pode ser útil se observar muitos falsos
+    positivos de Nothing ao reforçar erros fáceis.
+- **Não toque em val/test**: mantenha os splits de validação e teste com suas
+  proporções reais (~85/15) para medir o desempenho no cenário esperado; só
+  balanceie o treino.
+- **Aumente a diversidade da minoria**: ruídos de fundo, variação de ganho,
+  pequenas distorções temporais/frequenciais em G01 ajudam sem inventar eventos
+  irreais.
+- **Ajuste de limiar**: após treinar, escolha o threshold olhando a curva PR na
+  validação para calibrar o trade-off precisão/recall da classe G01 (evita
+  modelos que “chutam Nothing” sempre).
+
 ## Exemplo de pré-processamento (PyTorch)
 ```python
 import numpy as np
