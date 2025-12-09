@@ -46,6 +46,10 @@ Principais parâmetros adicionais:
   destacar `segment_idx` 51 a 54 de uma fita longa.
 - `--sequence-manifest`, `--fragments-dir`, `--output-dir` e parâmetros de tempo/espectrograma seguem o mesmo significado do visualizador completo.
 
+> Caminhos no `manifest_sequences.csv` são resolvidos de forma segura: se o `sequence_path` ou `snippet_path` já for absoluto ou existir tal como está
+> (por exemplo, `data/results/sequences/train/sequence_0.npy`), ele é usado diretamente; caso contrário, o script assume que o caminho é relativo à pasta
+> onde está o manifest. Isso evita duplicar prefixes de diretório e elimina warnings de arquivos ausentes por resolução incorreta.
+
 Exemplo (gera apenas as sequências 0 e 2 do split train):
 ```bash
 python src/visualize_sequences_minimal.py \

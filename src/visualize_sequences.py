@@ -108,6 +108,15 @@ def frames_to_seconds(n_frames: int, sr: int, frame_length: int, hop_length: int
     return ((n_frames - 1) * hop_length + frame_length) / float(sr)
 
 
+def resolve_sequence_path(sequence_path: str, manifest_dir: Path) -> Path:
+    path = Path(sequence_path)
+    if path.is_absolute() or ":" in sequence_path:
+        return path
+    if path.exists():
+        return path
+    return manifest_dir / path
+
+
 def load_fragment_metadata(fragment_dirs: List[Path]) -> Dict[str, dict]:
     mapping: Dict[str, dict] = {}
     for frag_dir in fragment_dirs:
@@ -170,6 +179,7 @@ def plot_sequence(
     sequence_record: pd.Series,
     meta_map: Dict[str, dict],
     output_dir: Path,
+    manifest_dir: Path,
     sr: int,
     frame_length: int,
     hop_length: int,
@@ -178,7 +188,7 @@ def plot_sequence(
 ) -> Path:
     segments = json.loads(sequence_record["segments"])
     total_frames = int(sequence_record["total_frames"])
-    sequence_path = Path(sequence_record["sequence_path"])
+    sequence_path = resolve_sequence_path(str(sequence_record["sequence_path"]), manifest_dir)
 
     waveform = reconstruct_waveform(
         segments=segments,
@@ -261,12 +271,14 @@ def main(cli_args: Optional[Sequence[str]] = None) -> None:
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_dir = args.sequence_manifest.parent
 
     for _, row in seq_manifest.iterrows():
         out_path = plot_sequence(
             sequence_record=row,
             meta_map=meta_map,
             output_dir=output_dir,
+            manifest_dir=manifest_dir,
             sr=args.target_sr,
             frame_length=args.frame_length,
             hop_length=args.hop_length,

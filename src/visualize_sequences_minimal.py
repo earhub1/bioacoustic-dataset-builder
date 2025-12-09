@@ -162,6 +162,15 @@ def resolve_sequence_segments(seq_df: pd.DataFrame, manifest_dir: Path) -> list[
     return segments
 
 
+def resolve_sequence_path(sequence_path: str, manifest_dir: Path) -> Path:
+    path = Path(sequence_path)
+    if path.is_absolute() or ":" in sequence_path:
+        return path
+    if path.exists():
+        return path
+    return manifest_dir / path
+
+
 def render_sequence(
     sequence_idx: int,
     split: str,
@@ -261,9 +270,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> None:
     grouped = seq_manifest.groupby(["sequence_idx", "split"])
 
     for (seq_idx, split), group in grouped:
-        sequence_path = Path(group["sequence_path"].iloc[0])
-        if not sequence_path.is_absolute():
-            sequence_path = manifest_dir / sequence_path
+        sequence_path = resolve_sequence_path(str(group["sequence_path"].iloc[0]), manifest_dir)
         if not sequence_path.exists():
             raise FileNotFoundError(f"Sequence file not found: {sequence_path}")
 
