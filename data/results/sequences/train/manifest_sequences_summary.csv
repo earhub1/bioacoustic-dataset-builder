@@ -1,0 +1,2 @@
+sequence_path,sequence_idx,split,total_frames,total_duration_s,n_segments,pack_all_mode,seed,skipped_too_long,fragment_limit_reached,truncated_segments
+data\results\sequences\train\sequence_0.npy,0,train,604007,60400.7,3023,True,42,0,False,0
