@@ -35,3 +35,23 @@ python src/visualize_sequences.py \
 ```
 
 Saída: arquivos `sequence_<n>.png` em `data/results/sequence_viz/`, contendo waveform reconstruído, espectrograma (dB), MFCC da sequência e máscara binária Nothing vs. demais classes.
+
+## Visualizador focalizado por índice (visualizações pontuais)
+Para gerar figuras apenas de sequências específicas (útil em artigos ou relatórios), use o script reduzido `visualize_sequences_minimal.py`, que aceita índices explícitos:
+
+Principais parâmetros adicionais:
+- `--sequence-idx`: pode ser repetido para listar índices de sequência a renderizar (ex.: `--sequence-idx 0 --sequence-idx 3`).
+- `--sequence-idx-range START END`: seleciona um intervalo inclusivo de `sequence_idx` (ex.: `--sequence-idx-range 0 4`).
+- `--sequence-manifest`, `--fragments-dir`, `--output-dir` e parâmetros de tempo/espectrograma seguem o mesmo significado do visualizador completo.
+
+Exemplo (gera apenas as sequências 0 e 2 do split train):
+```bash
+python src/visualize_sequences_minimal.py \
+  --sequence-manifest data/results/sequences/manifest_sequences.csv \
+  --fragments-dir data/results/fragments_combined \
+  --splits train \
+  --sequence-idx 0 --sequence-idx 2 \
+  --output-dir data/results/sequence_viz_focus
+```
+
+Saída: um PNG por sequência selecionada, com os mesmos quatro painéis (waveform, espectrograma em dB, MFCC salvo e máscara 0/1 para Nothing vs. demais classes). O script valida a existência de cada `snippet_path` e falha com mensagem clara se algum fragmento estiver ausente.
