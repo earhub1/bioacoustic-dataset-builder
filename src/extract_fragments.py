@@ -1,8 +1,8 @@
-"""Utility for extracting annotated audio fragments and MFCC features.
+"""Utility for extracting annotated audio fragments and acoustic features.
 
 This script reads a CSV file containing detection metadata and extracts the
 corresponding audio fragments, optionally downsampling them before computing
-MFCC features. Each fragment is saved as a ``.npy`` file inside a label-named
+MFCC or Mel-spectrogram features. Each fragment is saved as a ``.npy`` file inside a label-named
 subdirectory. A companion CSV manifest summarises the saved fragments.
 
 Example usage
@@ -36,7 +36,7 @@ class FragmentExtractionError(Exception):
 
 
 def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extract annotated audio fragments and MFCC features.")
+    parser = argparse.ArgumentParser(description="Extract annotated audio fragments and acoustic features.")
     parser.add_argument(
         "--csv-path",
         type=Path,
@@ -56,10 +56,30 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Target sampling rate for loaded audio (downsample if needed).",
     )
     parser.add_argument(
+        "--feature-type",
+        choices=["mfcc", "melspectrogram"],
+        default="mfcc",
+        help="Type of acoustic feature to extract for each fragment.",
+    )
+    parser.add_argument(
         "--n-mels",
+        "--n-mfcc",
+        dest="n_mfcc",
         type=int,
         default=9,
-        help="Number of MFCC coefficients to compute for each frame.",
+        help="Number of MFCC coefficients to compute for each frame (alias --n-mfcc).",
+    )
+    parser.add_argument(
+        "--mel-bins",
+        type=int,
+        default=64,
+        help="Number of Mel bins for the mel spectrogram (when --feature-type=melspectrogram).",
+    )
+    parser.add_argument(
+        "--mel-nfft",
+        type=int,
+        default=1024,
+        help="FFT size used when computing the mel spectrogram (when --feature-type=melspectrogram).",
     )
     parser.add_argument(
         "--window",
@@ -163,7 +183,7 @@ def load_audio_fragment(filepath: Path, onset_s: float, offset_s: float, target_
 def compute_mfcc(
     audio: np.ndarray,
     target_sr: int,
-    n_mels: int,
+    n_mfcc: int,
     frame_length: int,
     hop_length: int,
     window: str,
@@ -171,12 +191,29 @@ def compute_mfcc(
     mfcc = librosa.feature.mfcc(
         y=audio,
         sr=target_sr,
-        n_mfcc=n_mels,
+        n_mfcc=n_mfcc,
         n_fft=frame_length,
         hop_length=hop_length,
         window=window,
     )
     return mfcc
+
+
+def compute_mel_spectrogram(
+    audio: np.ndarray,
+    target_sr: int,
+    n_fft: int,
+    hop_length: int,
+    n_mels: int,
+) -> np.ndarray:
+    spectrogram = librosa.feature.melspectrogram(
+        y=audio,
+        sr=target_sr,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels,
+    )
+    return librosa.power_to_db(spectrogram, ref=np.max)
 
 
 def save_fragment(
@@ -249,7 +286,10 @@ def process_row(
     row: pd.Series,
     output_dir: Path,
     target_sr: int,
-    n_mels: int,
+    feature_type: str,
+    n_mfcc: int,
+    mel_bins: int,
+    mel_nfft: int,
     frame_length: int,
     hop_length: int,
     window: str,
@@ -266,7 +306,10 @@ def process_row(
 
     try:
         audio = load_audio_fragment(source_path, onset_s, offset_s, target_sr)
-        mfcc = compute_mfcc(audio, target_sr, n_mels, frame_length, hop_length, window)
+        if feature_type == "mfcc":
+            features = compute_mfcc(audio, target_sr, n_mfcc, frame_length, hop_length, window)
+        else:
+            features = compute_mel_spectrogram(audio, target_sr, mel_nfft, hop_length, mel_bins)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Skipping index %s due to error: %s", row.name, exc)
         return None
@@ -275,8 +318,8 @@ def process_row(
         base_candidate = row.get("filepath")
     base_filename = str(base_candidate) if base_candidate is not None else "fragment"
 
-    fragment_path = save_fragment(mfcc, output_dir, label, base_filename, row.name)
-    n_frames = mfcc.shape[1]
+    fragment_path = save_fragment(features, output_dir, label, base_filename, row.name)
+    n_frames = features.shape[1]
     duration = offset_s - onset_s
 
     return {
@@ -400,7 +443,10 @@ def extract_fragments(args: argparse.Namespace) -> pd.DataFrame:
             row=row,
             output_dir=args.output_dir,
             target_sr=args.target_sr,
-            n_mels=args.n_mels,
+            feature_type=args.feature_type,
+            n_mfcc=args.n_mfcc,
+            mel_bins=args.mel_bins,
+            mel_nfft=args.mel_nfft,
             frame_length=args.frame_length,
             hop_length=args.hop_length,
             window=args.window,

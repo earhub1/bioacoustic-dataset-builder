@@ -1,7 +1,7 @@
 # Fluxo de extração de fragmentos
 
 O script [`src/extract_fragments.py`](../src/extract_fragments.py) implementa uma CLI para gerar fragmentos de áudio anotados e
-seus coeficientes de Mel (MFCC) a partir de um manifesto CSV.
+suas features acústicas (MFCC ou mel spectrogram) a partir de um manifesto CSV.
 
 ## Entrada
 - CSV de detecções (padrão: `data/events/labels_0_30kHz_reapath.csv`).
@@ -9,7 +9,10 @@ seus coeficientes de Mel (MFCC) a partir de um manifesto CSV.
 
 ## Parâmetros principais
 - `--target-sr` (padrão `64000`): taxa de amostragem usada ao carregar o trecho; realiza downsample se o arquivo tiver SR maior.
-- `--n-mels` (padrão `9`): número de coeficientes MFCC por frame.
+- `--feature-type` (padrão `mfcc`): escolhe entre MFCC (`mfcc`) ou mel spectrogram (`melspectrogram`).
+- `--n-mels`/`--n-mfcc` (padrão `9`): número de coeficientes MFCC por frame.
+- `--mel-bins` (padrão `64`): quantidade de bins de Mel quando `--feature-type=melspectrogram`.
+- `--mel-nfft` (padrão `1024`): tamanho da FFT para o mel spectrogram (mantém o mesmo `hop_length` para 10 fps por padrão).
 - `--window` (padrão `hann`): janela aplicada ao cálculo dos MFCCs.
 - `--frame-length` (padrão `6400`): tamanho da FFT em amostras na SR de destino.
 - `--hop-length` (padrão `6400`): salto entre frames; com SR=64 kHz, cada frame representa 0,1 s.
@@ -29,16 +32,16 @@ Para eventos "Nothing", gere primeiro um manifesto dedicado ou combinado com o `
    uma amostra aleatória estável (`seed`) é aplicada depois desses filtros.
 2. **Resolução dos caminhos**: caminhos relativos são resolvidos em relação ao diretório do CSV para localizar o arquivo de áudio correspondente.
 3. **Recorte do áudio**: usa `librosa.load` para buscar apenas o trecho entre `onset_s` e `offset_s` já na SR alvo (`target_sr`). Se o áudio tiver múltiplos canais, apenas um canal é utilizado.
-4. **Extração de MFCC**: calcula `n_mels` coeficientes com `frame_length`, `hop_length` e `window` definidos, produzindo uma matriz `[n_mels, n_frames]`.
-5. **Persistência dos fragmentos**: salva os MFCCs em `.npy` dentro de uma subpasta com o nome do `label` (`output_dir/<label>/`), usando o índice da linha para compor o nome do arquivo.
+4. **Extração das features**: calcula MFCCs (`feature_type=mfcc`) ou mel spectrogram (`feature_type=melspectrogram`) usando os parâmetros fornecidos. O resultado é uma matriz `[n_features, n_frames]`, respeitando o mesmo `hop_length` (10 fps por padrão).
+5. **Persistência dos fragmentos**: salva as features (MFCC ou mel spectrogram) em `.npy` dentro de uma subpasta com o nome do `label` (`output_dir/<label>/`), usando o índice da linha para compor o nome do arquivo.
 6. **Manifesto de saída**: gera `output_dir/manifest.csv` contendo: `index`, `snippet_path`, `label`, `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames`. Fragmentos seguem os campos já presentes no CSV de entrada (se você apontar para um manifesto que contenha `Nothing`, eles serão extraídos e registrados da mesma forma, preservando `index=-1`).
 
 ## Fluxo em duas etapas com manifestos de Nothing
-Para reduzir o acoplamento e inspecionar os trechos de fundo antes de extrair MFCCs, você pode gerar um manifesto dedicado de `Nothing` e, opcionalmente, um manifesto combinado:
+Para reduzir o acoplamento e inspecionar os trechos de fundo antes de extrair as features, você pode gerar um manifesto dedicado de `Nothing` e, opcionalmente, um manifesto combinado:
 
 1. **Gerar manifesto Nothing**: use [`src/generate_nothing_manifest.py`](../src/generate_nothing_manifest.py) para amostrar intervalos livres por arquivo de áudio (respeitando `--non-event-count`, `--non-event-duration` ou `--non-event-duration-range`, e `--seed`). O script grava um `manifest_nothing.csv` com colunas `index=-1`, `label="Nothing"`, `filepath`, `onset_s`, `offset_s`, `duration_s` e `n_frames` estimados.
 2. **Manifesto combinado (opcional)**: forneça `--combined-manifest-path` para gravar um CSV que concatena as anotações originais com as linhas `Nothing` (mantendo `index` original ou `-1` para Nothing).
-3. **Extrair MFCCs**: a qualquer momento, aponte o `extract_fragments.py` para o manifesto desejado (original, Nothing ou combinado) para materializar os fragmentos como `.npy`.
+3. **Extrair features**: a qualquer momento, aponte o `extract_fragments.py` para o manifesto desejado (original, Nothing ou combinado) para materializar os fragmentos como `.npy` (MFCC ou mel spectrogram).
 
 ### Exemplo: gerar e extrair Nothing separadamente
 ```bash
