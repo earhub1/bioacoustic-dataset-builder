@@ -25,7 +25,7 @@ Ferramentas para preparar datasets bioacústicos (especialmente gravações mari
    - `manifest_nothing.csv` contém apenas `Nothing` com `index=-1`, `label="Nothing"`, `filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames` e `source_filepath` para rastrear o trecho original.
    - `manifest_combined.csv` (opcional) concatena o CSV original com as linhas Nothing, preservando os índices originais.
 
-2. **Extrair fragmentos e MFCCs** com `extract_fragments.py`, apontando para o manifesto desejado (original, Nothing ou combinado):
+2. **Extrair fragmentos e features (MFCC ou mel spectrogram)** com `extract_fragments.py`, apontando para o manifesto desejado (original, Nothing ou combinado):
    ```bash
    # Extrair apenas Nothing
    python src/extract_fragments.py \
@@ -48,8 +48,8 @@ Ferramentas para preparar datasets bioacústicos (especialmente gravações mari
    ```
    O extrator lê cada linha do manifesto, pode aplicar filtros de duração (`--min-duration`/`--max-duration` em segundos) antes de
    processar, aplicar tetos por rótulo (`--max-per-label` e `--max-nothing`) antes de qualquer amostragem global (`--limit`),
-   recortar o trecho solicitado (downsample opcional via `--target-sr`), calcular MFCCs (`--n-mels`, `--frame-length`,
-   `--hop-length`, `--window`) e gravar os arquivos em subpastas por `label`, além de `manifest.csv` com `snippet_path`, `label`,
+   recortar o trecho solicitado (downsample opcional via `--target-sr`), calcular MFCCs (`--feature-type=mfcc` com `--n-mfcc`/`--n-mels`, `--frame-length`,
+   `--hop-length`, `--window`) ou mel spectrogram (`--feature-type=melspectrogram` com `--mel-bins` e `--mel-nfft`) e gravar os arquivos em subpastas por `label`, além de `manifest.csv` com `snippet_path`, `label`,
    `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames` e `index` (herdado do CSV de entrada).
 
 ## Passo a passo para calibrar Nothing sem viciar o modelo
@@ -76,7 +76,7 @@ Para evitar que o dataset fique dominado por silêncios muito homogêneos, ajust
      --nothing-manifest-path data/events/manifest_nothing.csv
    ```
 5. **(Opcional) Crie o manifesto combinado**: inclua `--combined-manifest-path` para já obter um CSV com eventos + Nothing e reutilizá-lo diretamente no extrator.
-6. **Extraia as features**: aponte `extract_fragments.py` para o manifesto escolhido (Nothing ou combinado) e gere os MFCCs.
+6. **Extraia as features**: aponte `extract_fragments.py` para o manifesto escolhido (Nothing ou combinado) e gere MFCCs ou mel spectrograms.
 
 ## Montar sequências sintéticas com `build_dataset.py` (opcional)
 Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas concatenando Nothing e eventos, ignorando rótulos indesejados (ex.: `NI`). Isso ajuda a treinar modelos com sequências mais realistas e balanceadas.
