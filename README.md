@@ -48,8 +48,8 @@ Ferramentas para preparar datasets bioacústicos (especialmente gravações mari
    ```
    O extrator lê cada linha do manifesto, pode aplicar filtros de duração (`--min-duration`/`--max-duration` em segundos) antes de
    processar, aplicar tetos por rótulo (`--max-per-label` e `--max-nothing`) antes de qualquer amostragem global (`--limit`),
-   recortar o trecho solicitado (downsample opcional via `--target-sr`), calcular MFCCs (`--feature-type=mfcc` com `--n-mfcc`/`--n-mels`, `--frame-length`,
-   `--hop-length`, `--window`) ou mel spectrogram (`--feature-type=melspectrogram` com `--mel-bins` e `--mel-nfft`) e gravar os arquivos em subpastas por `label`, além de `manifest.csv` com `snippet_path`, `label`,
+   recortar o trecho solicitado (downsample opcional via `--target-sr`), calcular MFCCs (`--feature-type=mfcc` com `--n-mfcc`, `--frame-length`,
+   `--hop-length`, `--window`) ou mel spectrogram (`--feature-type=melspectrogram` com `--mel-bins`/`--n-mels` e `--mel-nfft`) e gravar os arquivos em subpastas por `label`, além de `manifest.csv` com `snippet_path`, `label`,
    `source_filepath`, `onset_s`, `offset_s`, `duration_s`, `n_frames` e `index` (herdado do CSV de entrada).
 
 ## Passo a passo para calibrar Nothing sem viciar o modelo

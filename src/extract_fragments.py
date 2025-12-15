@@ -62,18 +62,19 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Type of acoustic feature to extract for each fragment.",
     )
     parser.add_argument(
-        "--n-mels",
         "--n-mfcc",
         dest="n_mfcc",
         type=int,
         default=9,
-        help="Number of MFCC coefficients to compute for each frame (alias --n-mfcc).",
+        help="Number of MFCC coefficients to compute for each frame.",
     )
     parser.add_argument(
         "--mel-bins",
+        "--n-mels",
         type=int,
         default=64,
-        help="Number of Mel bins for the mel spectrogram (when --feature-type=melspectrogram).",
+        dest="mel_bins",
+        help="Number of mel frequency bins for the mel spectrogram (when --feature-type=melspectrogram).",
     )
     parser.add_argument(
         "--mel-nfft",
@@ -212,8 +213,9 @@ def compute_mel_spectrogram(
         n_fft=n_fft,
         hop_length=hop_length,
         n_mels=n_mels,
+        power=2.0,
     )
-    return librosa.power_to_db(spectrogram, ref=np.max)
+    return librosa.power_to_db(spectrogram, ref=1.0, top_db=80)
 
 
 def save_fragment(
