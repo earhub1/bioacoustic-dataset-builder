@@ -1,10 +1,10 @@
 """CLI to assemble synthetic sequences from extracted fragment features.
 
 This tool reads one or more fragment manifests produced by
-``extract_fragments.py`` and concatenates the stored feature matrices into
-longer sequences. It supports class inclusion/exclusion (e.g., ignorar "NI"),
-balancing the share of "Nothing" against eventos anotados, and reproducible
-sampling.
+``extract_fragments.py`` and concatenates the stored log-mel spectrogram (dB)
+matrices into longer sequences. It supports class inclusion/exclusion (e.g.,
+ignorar "NI"), balancing the share of "Nothing" against eventos anotados, and
+reproducible sampling.
 """
 from __future__ import annotations
 
@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FRAGMENTS_DIR = Path("data/results/fragments")
 DEFAULT_OUTPUT_DIR = Path("data/results/sequences")
+FEATURE_TYPE = "logmel_db"
+FEATURE_DB_REF = 1.0
+FEATURE_TOP_DB = 80
 
 
 def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -119,6 +122,12 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Sampling rate used to interpret frame/hop durations (match the extractor).",
     )
     parser.add_argument(
+        "--expected-n-mels",
+        type=int,
+        default=64,
+        help="Expected number of mel frequency bins (log-mel dB fragments).",
+    )
+    parser.add_argument(
         "--allow-partial-fragments",
         action="store_true",
         help=(
@@ -186,6 +195,29 @@ def resolve_snippet_path(snippet: str, manifest_dir: Path) -> Path:
 
     # Fallback: treat the snippet path as relative to the manifest directory.
     return manifest_dir / path
+
+
+def normalize_feature_shape(features: np.ndarray, expected_n_mels: int, snippet_path: Path) -> np.ndarray:
+    if features.ndim != 2:
+        raise ValueError(
+            f"Fragment {snippet_path} has shape {features.shape}; expected 2D log-mel dB (n_mels x frames)."
+        )
+
+    if features.shape[0] == expected_n_mels:
+        return features
+
+    if features.shape[1] == expected_n_mels:
+        logger.warning(
+            "Transposing fragment %s from shape %s to (n_mels x frames) using expected_n_mels=%d",
+            snippet_path,
+            features.shape,
+            expected_n_mels,
+        )
+        return features.T
+
+    raise ValueError(
+        f"Fragment {snippet_path} has incompatible shape {features.shape}; expected n_mels={expected_n_mels} on the first dimension."
+    )
 
 
 def load_manifests(
@@ -261,11 +293,12 @@ def build_sequence(
     sr: int,
     frame_length: int,
     hop_length: int,
+    expected_n_mels: int,
     nothing_ratio: float,
     rng: np.random.Generator,
     max_fragments: Optional[int] = None,
     allow_partial_fragments: bool = False,
-    ) -> tuple[np.ndarray, List[dict], dict]:
+) -> tuple[np.ndarray, List[dict], dict]:
     label_pools: Dict[str, List[int]] = {}
     for idx, row in df.iterrows():
         label_pools.setdefault(row["label"], []).append(idx)
@@ -301,14 +334,24 @@ def build_sequence(
             continue
 
         features = np.load(snippet_path)
+        features = normalize_feature_shape(features, expected_n_mels, snippet_path)
         n_frames = features.shape[1]
         if n_frames <= 0:
             continue
 
         remaining_frames = target_frames - current_frames
+        if remaining_frames <= 0:
+            break
         if n_frames > remaining_frames and not allow_partial_fragments:
             skipped_too_long += 1
             continue
+
+        truncated = False
+        original_end_frame = current_frames + n_frames
+        if n_frames > remaining_frames and allow_partial_fragments:
+            features = features[:, :remaining_frames]
+            n_frames = features.shape[1]
+            truncated = True
 
         start_frame = current_frames
         end_frame = current_frames + n_frames
@@ -320,6 +363,8 @@ def build_sequence(
                 "snippet_path": str(snippet_path),
                 "start_frame": int(start_frame),
                 "end_frame": int(end_frame),
+                "original_end_frame": int(original_end_frame),
+                "truncated": truncated,
             }
         )
 
@@ -339,7 +384,9 @@ def build_sequence(
             continue
         end_frame = min(seg["end_frame"], target_frames)
         start_frame = seg["start_frame"]
-        truncated_flag = end_frame < seg["end_frame"]
+        truncated_flag = bool(seg.get("truncated", False)) or end_frame < seg.get(
+            "original_end_frame", seg["end_frame"]
+        )
         if truncated_flag:
             truncated_segments += 1
         trimmed_segments.append(
@@ -371,6 +418,10 @@ def save_sequence(
     split: str,
     pack_all_mode: bool,
     seed: int,
+    expected_n_mels: int,
+    feature_type: str,
+    db_ref: float,
+    top_db: float,
 ) -> tuple[dict, List[dict]]:
     ensure_output_dir(output_dir)
     seq_path = output_dir / f"sequence_{sequence_idx}.npy"
@@ -388,6 +439,10 @@ def save_sequence(
         "n_segments": len(segments),
         "pack_all_mode": pack_all_mode,
         "seed": seed,
+        "feature_type": feature_type,
+        "mel_bins": expected_n_mels,
+        "db_ref": db_ref,
+        "top_db": top_db,
     }
 
     segment_records: List[dict] = []
@@ -408,6 +463,8 @@ def save_sequence(
                 "end_s": seg.get("end_s", frames_to_seconds(seg["end_frame"], sr, frame_length, hop_length)),
                 "duration_s": frames_to_seconds(duration_frames, sr, frame_length, hop_length),
                 "truncated": bool(seg.get("truncated", False)),
+                "feature_type": feature_type,
+                "mel_bins": expected_n_mels,
             }
         )
 
@@ -524,6 +581,10 @@ def build_sequences_pack_all(
                 split=split,
                 pack_all_mode=True,
                 seed=args.seed,
+                expected_n_mels=args.expected_n_mels,
+                feature_type=FEATURE_TYPE,
+                db_ref=FEATURE_DB_REF,
+                top_db=FEATURE_TOP_DB,
             )
             summary_record.update(
                 {
@@ -547,6 +608,7 @@ def build_sequences_pack_all(
                 continue
 
             features = np.load(snippet_path)
+            features = normalize_feature_shape(features, args.expected_n_mels, snippet_path)
             n_frames = features.shape[1]
             if n_frames <= 0:
                 continue
@@ -639,6 +701,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             sr=args.target_sr,
             frame_length=args.frame_length,
             hop_length=args.hop_length,
+            expected_n_mels=args.expected_n_mels,
             nothing_ratio=args.nothing_ratio,
             rng=rng,
             max_fragments=args.max_fragments_per_sequence,
@@ -659,6 +722,10 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             split=split,
             pack_all_mode=False,
             seed=args.seed,
+            expected_n_mels=args.expected_n_mels,
+            feature_type=FEATURE_TYPE,
+            db_ref=FEATURE_DB_REF,
+            top_db=FEATURE_TOP_DB,
         )
         summary_record.update(
             {
