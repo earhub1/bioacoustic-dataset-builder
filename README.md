@@ -114,6 +114,7 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
    - Sequências salvas como `.npy` em `data/results/sequences/{train,val,test}/sequence_<n>.npy`.
    - `manifest_sequences_summary.csv` na raiz de `data/results/sequences` e por split, com uma linha por fita: `sequence_path`, `sequence_idx`, `split`, `total_duration_s`, `total_frames`, `n_segments`, `seed`, `skipped_too_long`, `fragment_limit_reached`, `truncated_segments`, `pack_all_mode`.
    - `manifest_sequences.csv` (manifesto por segmento) na raiz de `data/results/sequences` e por split, com uma linha por trecho usado: `sequence_path`, `sequence_idx`, `split`, `segment_idx`, `label`, `snippet_path`, `start_frame`, `end_frame`, `duration_frames`, `start_s`, `end_s`, `duration_s`, `truncated`.
+   - Para carregar as fitas log-mel em dB nos modelos e aplicar normalização depois do load, consulte a seção “Como consumir as saídas no treinamento” em `docs/build_dataset.md`.
 7. **(Opcional) Visualizar sequências**: use `python src/visualize_sequence_colormesh.py` para gerar um colormesh das fitas (freq x frames) acompanhado de uma faixa binária Nothing(0)/evento(1). Você pode filtrar por `sequence_idx`, `segment_idx` e split, e limitar a janela com `--max-plot-duration` (10 fps por padrão com `hop_length=6400` e `target_sr=64000`). Consulte `docs/visualize_sequences.md` para exemplos.
 
 ## Próximos passos

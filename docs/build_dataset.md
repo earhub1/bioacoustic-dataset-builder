@@ -76,3 +76,40 @@ Neste modo, cada fragmento é usado exatamente uma vez, os frames totais são di
 
 ## Visualização
 Para visualizar rapidamente o colormesh das sequências salvas, use `visualize_sequence_colormesh.py`, que lê o `manifest_sequences.csv` segmentado e plota apenas o tensor (freq x frames) com eixo de tempo em segundos (10 fps com os defaults `hop_length=6400`, `target_sr=64000`). É possível filtrar por `sequence_idx`, `segment_idx`, split e limitar a janela com `--max-plot-duration`. Consulte `docs/visualize_sequences.md` para o passo a passo.
+
+## Como consumir as saídas no treinamento
+
+### Formato das features e metadados
+- Cada `sequence_*.npy` contém um tensor **log-mel em dB** com `ref=1.0` e `top_db=80`, shape `(n_mels, n_frames)` (padrão `n_mels=64`). Nenhuma normalização estatística adicional é aplicada na extração ou no builder.
+- O manifesto (`manifest_sequences_summary.csv`) registra `feature_type=logmel_db`, `mel_bins`, `db_ref` e `top_db`, além da duração total em frames e segundos. O `manifest_sequences.csv` detalha os segmentos (intervalos `start_frame`/`end_frame`, label, se foi truncado etc.), permitindo reconstruir as janelas temporais.
+- A taxa de quadros segue a configuração do extrator (`hop_length` e `target_sr`), ficando em ~10 fps com os defaults (6400/64000). Use esses valores para converter frame → segundo na pós-processamento ou no data loader.
+
+### Carregando e preparando lotes
+- Carregue o tensor diretamente com `np.load(sequence_path)` e obtenha os segmentos relevantes a partir do manifesto. O eixo 0 são as frequências (mel bins) e o eixo 1 é o tempo (frames).
+- Para modelos que operam em janelas fixas, fatia-se `features[:, start_frame:end_frame]` usando os índices do manifesto. Se necessário, aplique padding temporal à direita para igualar comprimentos dentro do batch, mantendo o eixo de frequência intacto.
+- Exemplo simples em PyTorch (janelas fixas):
+  ```python
+  import numpy as np
+  import torch
+
+  seq = np.load(sequence_path)  # (n_mels, T)
+  # recorte de um segmento do manifesto
+  window = seq[:, start_frame:end_frame]
+  # padding opcional para alinhar comprimentos
+  pad_right = target_frames - window.shape[1]
+  if pad_right > 0:
+      window = np.pad(window, ((0, 0), (0, pad_right)), mode="constant", constant_values=-80.0)
+  x = torch.from_numpy(window).float()  # (n_mels, target_frames)
+  ```
+
+### Normalização recomendada (após o carregamento)
+- **Não** aplique `ref=np.max` ou normalização por fragmento/segmento. Preserve a referência absoluta em dB para manter a comparabilidade de energia entre exemplos.
+- Calcule estatísticas **apenas no split de treino** e reutilize nos demais splits. Opções comuns:
+  - média e desvio padrão globais por frequência: `mean = train.mean(axis=(1,2))`, `std = train.std(axis=(1,2))`
+  - ou apenas `mean` global por frequência, deixando a escala original do desvio.
+- Aplique a normalização escolhida **depois** de carregar a janela de interesse (p. ex., `(window - mean[:, None]) / (std[:, None] + 1e-6)`).
+
+### Boas práticas adicionais
+- Se seu modelo aceitar comprimentos variáveis, evite padding e use máscaras de atenção derivadas do comprimento real em frames do segmento.
+- Para tarefas frame a frame, o manifesto fornece `start_s`/`end_s` que podem ajudar a alinhar labels temporais ou métricas de atraso.
+- Os valores em dB já estão limitados por `top_db=80`; caso você use padding, preencha com um valor baixo coerente (ex.: `-80.0`) para não distorcer a distribuição.
