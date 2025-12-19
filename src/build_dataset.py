@@ -59,6 +59,14 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Target duration in seconds for each synthetic sequence.",
     )
     parser.add_argument(
+        "--split-by-fragment",
+        action="store_true",
+        help=(
+            "Split fragment pools into train/val/test without replacement before building sequences. "
+            "When enabled, sequences are sampled only from the assigned split and manifest_split.csv is saved."
+        ),
+    )
+    parser.add_argument(
         "--target-event-fragments",
         type=int,
         default=None,
@@ -873,6 +881,9 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     if args.pack_all_fragments and args.target_event_fragments is not None:
         raise ValueError("--target-event-fragments is not supported together with --pack-all-fragments.")
 
+    if args.pack_all_fragments and args.split_by_fragment:
+        raise ValueError("--split-by-fragment is not supported together with --pack-all-fragments.")
+
     if args.target_event_fragments is not None and args.target_event_fragments <= 0:
         raise ValueError("--target-event-fragments must be a positive integer.")
 
@@ -922,7 +933,28 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     summary_records: List[dict] = []
     segment_records: List[dict] = []
 
+    if args.split_by_fragment:
+        ensure_output_dir(args.output_dir)
+        total_fragments = len(df)
+        if total_fragments <= 0:
+            raise ValueError("No fragments available to split.")
+        counts = [int(total_fragments * p) for p in split_probs]
+        counts[-1] += total_fragments - sum(counts)
+        indices = rng.permutation(df.index.to_numpy())
+        split_assignments: List[str] = []
+        for split, count in zip(split_labels, counts):
+            split_assignments.extend([split] * count)
+        df = df.loc[indices].copy()
+        df["split"] = split_assignments
+        split_manifest_path = args.output_dir / "manifest_split.csv"
+        df.to_csv(split_manifest_path, index=False)
+        logger.info("Saved split manifest with %d fragments to %s", len(df), split_manifest_path)
+
     if args.validate_composition:
+        if args.split_by_fragment:
+            df = df[df["split"] == split_labels[0]]
+            if df.empty:
+                raise ValueError(f"No fragments available for split '{split_labels[0]}' to validate.")
         features, segments, meta = build_sequence(
             df=df,
             target_frames=target_frames,
@@ -954,52 +986,108 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
         logger.info("Generated validation sequence with shape %s", features.shape)
         return pd.DataFrame([composition])
 
-    for seq_idx in range(args.num_sequences):
-        features, segments, meta = build_sequence(
-            df=df,
-            target_frames=target_frames,
-            sr=args.target_sr,
-            frame_length=args.frame_length,
-            hop_length=args.hop_length,
-            expected_n_mels=args.expected_n_mels,
-            nothing_ratio=args.nothing_ratio,
-            rng=rng,
-            max_fragments=args.max_fragments_per_sequence,
-            allow_partial_fragments=args.allow_partial_fragments,
-            max_consecutive_event_fragments=args.max_consecutive_event_fragments,
-            max_consecutive_event_frames=args.max_consecutive_event_frames,
-            min_nothing_after_event_frames=args.min_nothing_after_event_frames,
-        )
+    if args.split_by_fragment:
+        seq_counts = [int(args.num_sequences * p) for p in split_probs]
+        seq_counts[-1] += args.num_sequences - sum(seq_counts)
+        seq_idx = 0
+        for split, split_count in zip(split_labels, seq_counts):
+            if split_count <= 0:
+                continue
+            split_df = df[df["split"] == split]
+            if split_df.empty:
+                raise ValueError(f"No fragments available for split '{split}'.")
+            split_dir = args.output_dir / split
+            for _ in range(split_count):
+                features, segments, meta = build_sequence(
+                    df=split_df,
+                    target_frames=target_frames,
+                    sr=args.target_sr,
+                    frame_length=args.frame_length,
+                    hop_length=args.hop_length,
+                    expected_n_mels=args.expected_n_mels,
+                    nothing_ratio=args.nothing_ratio,
+                    rng=rng,
+                    max_fragments=args.max_fragments_per_sequence,
+                    allow_partial_fragments=args.allow_partial_fragments,
+                    max_consecutive_event_fragments=args.max_consecutive_event_fragments,
+                    max_consecutive_event_frames=args.max_consecutive_event_frames,
+                    min_nothing_after_event_frames=args.min_nothing_after_event_frames,
+                )
 
-        split = rng.choice(split_labels, p=split_probs)
-        split_dir = args.output_dir / split
+                summary_record, seq_segments = save_sequence(
+                    output_dir=split_dir,
+                    sequence_idx=seq_idx,
+                    features=features,
+                    segments=segments,
+                    sr=args.target_sr,
+                    frame_length=args.frame_length,
+                    hop_length=args.hop_length,
+                    split=split,
+                    pack_all_mode=False,
+                    seed=args.seed,
+                    expected_n_mels=args.expected_n_mels,
+                    feature_type=FEATURE_TYPE,
+                    db_ref=FEATURE_DB_REF,
+                    top_db=FEATURE_TOP_DB,
+                )
+                summary_record.update(
+                    {
+                        "skipped_too_long": meta["skipped_too_long"],
+                        "fragment_limit_reached": meta["fragment_limit_reached"],
+                        "truncated_segments": meta["truncated_segments"],
+                    }
+                )
+                summary_record.update(meta.get("composition", {}))
+                summary_records.append(summary_record)
+                segment_records.extend(seq_segments)
+                seq_idx += 1
+    else:
+        for seq_idx in range(args.num_sequences):
+            features, segments, meta = build_sequence(
+                df=df,
+                target_frames=target_frames,
+                sr=args.target_sr,
+                frame_length=args.frame_length,
+                hop_length=args.hop_length,
+                expected_n_mels=args.expected_n_mels,
+                nothing_ratio=args.nothing_ratio,
+                rng=rng,
+                max_fragments=args.max_fragments_per_sequence,
+                allow_partial_fragments=args.allow_partial_fragments,
+                max_consecutive_event_fragments=args.max_consecutive_event_fragments,
+                max_consecutive_event_frames=args.max_consecutive_event_frames,
+                min_nothing_after_event_frames=args.min_nothing_after_event_frames,
+            )
 
-        summary_record, seq_segments = save_sequence(
-            output_dir=split_dir,
-            sequence_idx=seq_idx,
-            features=features,
-            segments=segments,
-            sr=args.target_sr,
-            frame_length=args.frame_length,
-            hop_length=args.hop_length,
-            split=split,
-            pack_all_mode=False,
-            seed=args.seed,
-            expected_n_mels=args.expected_n_mels,
-            feature_type=FEATURE_TYPE,
-            db_ref=FEATURE_DB_REF,
-            top_db=FEATURE_TOP_DB,
-        )
-        summary_record.update(
-            {
-                "skipped_too_long": meta["skipped_too_long"],
-                "fragment_limit_reached": meta["fragment_limit_reached"],
-                "truncated_segments": meta["truncated_segments"],
-            }
-        )
-        summary_record.update(meta.get("composition", {}))
-        summary_records.append(summary_record)
-        segment_records.extend(seq_segments)
+            split = rng.choice(split_labels, p=split_probs)
+            split_dir = args.output_dir / split
+
+            summary_record, seq_segments = save_sequence(
+                output_dir=split_dir,
+                sequence_idx=seq_idx,
+                features=features,
+                segments=segments,
+                sr=args.target_sr,
+                frame_length=args.frame_length,
+                hop_length=args.hop_length,
+                split=split,
+                pack_all_mode=False,
+                seed=args.seed,
+                expected_n_mels=args.expected_n_mels,
+                feature_type=FEATURE_TYPE,
+                db_ref=FEATURE_DB_REF,
+                top_db=FEATURE_TOP_DB,
+            )
+            summary_record.update(
+                {
+                    "skipped_too_long": meta["skipped_too_long"],
+                    "fragment_limit_reached": meta["fragment_limit_reached"],
+                    "truncated_segments": meta["truncated_segments"],
+                }
+            )
+            summary_record.update(meta.get("composition", {}))
+            summary_records.append(summary_record)
+            segment_records.extend(seq_segments)
 
     summary_df = pd.DataFrame(summary_records)
     segments_df = pd.DataFrame(segment_records)

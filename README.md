@@ -85,7 +85,7 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
 
 1. **Escolha os fragmentos de entrada**: defina os diretórios com `manifest.csv` resultantes da extração (padrão: `data/results/fragments`). Use `--fragments-dir` múltiplas vezes se quiser combinar fontes.
 2. **Filtre labels**: por padrão, `NI` é excluído. Para incluir/excluir explicitamente, use `--include-labels` e/ou `--exclude-labels`.
-3. **Defina duração, balanceamento e splits**: use `--sequence-duration` para a duração alvo (s) e `--nothing-ratio` para controlar a razão Nothing:eventos (ex.: 1.0 ≈ 1:1 quando ambos existem). Ajuste `--num-sequences` para quantas fitas deseja. Se quiser definir a duração com base em N fragmentos de um evento específico para garantir 50/50 por frames, use `--target-event-fragments` junto de `--event-label` (isso substitui `--sequence-duration`). Se precisar limitar quantos trechos entram em cada sequência, use `--max-fragments-per-sequence`; para aceitar fragmentos maiores que o orçamento restante, ative `--allow-partial-fragments` (por padrão eles são descartados e um novo trecho é sorteado). Para evitar “runs” longos de eventos e garantir bordas de Nothing, use `--max-consecutive-event-fragments`/`--max-consecutive-event-frames` e `--min-nothing-after-event-frames`. Controle o split de saída com `--train-ratio`, `--val-ratio` e `--test-ratio` (padrão 0.7/0.15/0.15); as sequências serão gravadas em subpastas `train/`, `val/` e `test` sob `--output-dir`.
+3. **Defina duração, balanceamento e splits**: use `--sequence-duration` para a duração alvo (s) e `--nothing-ratio` para controlar a razão Nothing:eventos (ex.: 1.0 ≈ 1:1 quando ambos existem). Ajuste `--num-sequences` para quantas fitas deseja. Se quiser definir a duração com base em N fragmentos de um evento específico para garantir 50/50 por frames, use `--target-event-fragments` junto de `--event-label` (isso substitui `--sequence-duration`). Se precisar limitar quantos trechos entram em cada sequência, use `--max-fragments-per-sequence`; para aceitar fragmentos maiores que o orçamento restante, ative `--allow-partial-fragments` (por padrão eles são descartados e um novo trecho é sorteado). Para evitar “runs” longos de eventos e garantir bordas de Nothing, use `--max-consecutive-event-fragments`/`--max-consecutive-event-frames` e `--min-nothing-after-event-frames`. Se quiser garantir que nenhum fragmento apareça em mais de um split, ative `--split-by-fragment` (gera `manifest_split.csv` e limita a amostragem ao pool de cada split). Controle o split de saída com `--train-ratio`, `--val-ratio` e `--test-ratio` (padrão 0.7/0.15/0.15); as sequências serão gravadas em subpastas `train/`, `val/` e `test` sob `--output-dir`.
 4. **Gere as sequências (modo padrão)**:
    ```bash
   python src/build_dataset.py \
@@ -107,6 +107,7 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
      --target-event-fragments 120 \
      --event-label G01 \
      --nothing-ratio 1.0 \
+     --split-by-fragment \
      --num-sequences 3 \
      --output-dir data/results/sequences_balanced \
      --seed 7

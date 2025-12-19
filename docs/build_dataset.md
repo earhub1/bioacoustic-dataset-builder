@@ -13,6 +13,7 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 - `--sequence-duration`: duração alvo (em segundos) de cada sequência gerada no modo padrão de amostragem. O script converte essa duração em número de frames usando `frame_length` e `hop_length` (padrões: 6400 cada, com `target_sr=64000`, equivalendo a ~0,1 s por frame).
 - `--target-event-fragments`: quando definido, o builder seleciona N fragmentos de um label de evento e calcula o orçamento de frames como o dobro do total desses eventos, visando 50/50 entre eventos e `Nothing`. Esse modo substitui `--sequence-duration` e exige `--event-label` quando houver mais de um evento.
 - `--event-label`: rótulo do evento a ser usado com `--target-event-fragments` (ex.: `G01`). Se houver apenas um evento disponível (além de `Nothing`), o script pode inferir automaticamente.
+- `--split-by-fragment`: divide os fragmentos em `train`/`val`/`test` **sem reposição** antes da montagem das sequências. A amostragem passa a ocorrer apenas dentro do pool de cada split e um `manifest_split.csv` é salvo em `--output-dir` para manter a divisão fixa.
 - `--pack-all-fragments`: ativa o modo exaustivo, que consome cada fragmento exatamente uma vez, sem reposição, e distribui os frames entre os splits (`train`/`val`/`test`) conforme o orçamento definido pelas razões de split. Nesse modo, `--sequence-duration` não é usado para limitar as fitas; em vez disso você pode opcionalmente definir `--max-sequence-duration`.
 - `--max-sequence-duration`: (apenas com `--pack-all-fragments`) duração máxima de cada sequência gerada. Se omitido, o script cria **uma sequência por split** contendo todos os frames atribuídos àquele conjunto. Se definido, o builder abre novas sequências sempre que a atual atingiria o limite, mantendo todos os fragmentos (sem truncar) e marcando o manifesto como `pack_all_mode=True`.
 - `--max-fragments-per-sequence`: limite opcional de quantos fragmentos podem ser concatenados. Se atingido, a sequência é finalizada mesmo que a duração alvo não tenha sido alcançada.
@@ -40,6 +41,10 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
      - se ambos existirem, sorteia-se `Nothing` com peso `nothing_ratio` e os demais labels com peso 1, **exceto** quando o limite de eventos consecutivos (`--max-consecutive-event-fragments` ou `--max-consecutive-event-frames`) foi atingido ou ainda restarem frames pendentes de `Nothing` exigidos por `--min-nothing-after-event-frames` (nesses casos `Nothing` é forçado, se disponível).
    - **Amostragem de fragmento**: seleciona-se aleatoriamente uma linha do pool do label escolhido e carrega-se o `.npy` correspondente. O script ignora fragmentos ausentes ou com `n_frames <= 0`.
    - **Concatenação temporal**: os fragmentos são empilhados na dimensão temporal (`axis=1`). O processo continua até atingir ou ultrapassar o número de frames alvo derivado de `--sequence-duration` (ou de `--target-event-fragments`, quando usado), respeitando `--max-fragments-per-sequence` (quando definido), os limites de consecutivos e o gap mínimo de `Nothing`, além de um limite de tentativas para evitar laços infinitos.
+4. **Split sem reposição (`--split-by-fragment`)**:
+   - Antes de montar as sequências, o builder embaralha os fragmentos e os distribui em `train`/`val`/`test` sem reposição, conforme `train_ratio/val_ratio/test_ratio`.
+   - A amostragem passa a ocorrer **apenas** dentro do pool do split correspondente, evitando que um mesmo fragmento apareça em treino e validação/teste.
+   - Um `manifest_split.csv` é gravado em `--output-dir` para manter a divisão fixa e auditável.
    - **Tratamento de fragmentos longos**: por padrão, se um fragmento exceder o orçamento restante de frames, ele é ignorado e outro trecho é sorteado. Com `--allow-partial-fragments`, o fragmento pode ser usado mesmo que ultrapasse o limite; a sequência será truncada no ajuste final, marcando o segmento como truncado.
    - **Ajuste final**: se a sequência exceder os frames alvo, é truncada. Cada segmento recebe `start_frame`, `end_frame`, `start_s`, `end_s` e `truncated` (quando houve corte) calculados a partir de `frame_length`/`hop_length`/`target_sr`.
 4. **Modo exaustivo (`--pack-all-fragments`)**:
@@ -52,6 +57,7 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 - **Manifestos**:
   - `manifest_sequences_summary.csv`: resumo por fita, salvo na raiz de `--output-dir` (e em cada subpasta de split). Colunas principais: `sequence_path`, `sequence_idx`, `split`, `total_frames`, `total_duration_s`, `n_segments`, `pack_all_mode`, `seed`, `skipped_too_long`, `fragment_limit_reached`, `truncated_segments`, `feature_type`, `mel_bins`, `db_ref`, `top_db`, `frames_by_label` (JSON), `frames_nothing`, `frames_events`, `pct_nothing`, `pct_events`, `max_event_run_frames`, `max_event_run_seconds`, `max_event_run_fragments`, `num_event_runs`.
   - `manifest_sequences.csv`: manifesto detalhado por **segmento**, salvo na raiz (e por split). Cada linha indica um trecho dentro de uma sequência com: `sequence_path`, `sequence_idx`, `split`, `segment_idx`, `label`, `snippet_path`, `start_frame`, `end_frame`, `duration_frames`, `start_s`, `end_s`, `duration_s`, `truncated`, `feature_type`, `mel_bins`. Esse formato gera uma linha por trecho, facilitando auditoria e análises posteriores.
+  - `manifest_split.csv`: salvo apenas quando `--split-by-fragment` está ativo, contém os fragmentos originais com a coluna `split` atribuída (sem reposição) para garantir que não haja vazamento entre treino/val/teste.
 
 ## Exemplos de uso
 ### Modo padrão (amostragem)
@@ -81,6 +87,7 @@ python src/build_dataset.py \
   --target-event-fragments 120 \
   --event-label G01 \
   --nothing-ratio 1.0 \
+  --split-by-fragment \
   --num-sequences 3 \
   --output-dir data/results/sequences_balanced \
   --seed 7
