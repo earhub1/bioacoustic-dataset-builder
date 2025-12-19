@@ -11,6 +11,8 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 
 ## Parâmetros principais
 - `--sequence-duration`: duração alvo (em segundos) de cada sequência gerada no modo padrão de amostragem. O script converte essa duração em número de frames usando `frame_length` e `hop_length` (padrões: 6400 cada, com `target_sr=64000`, equivalendo a ~0,1 s por frame).
+- `--target-event-fragments`: quando definido, o builder seleciona N fragmentos de um label de evento e calcula o orçamento de frames como o dobro do total desses eventos, visando 50/50 entre eventos e `Nothing`. Esse modo substitui `--sequence-duration` e exige `--event-label` quando houver mais de um evento.
+- `--event-label`: rótulo do evento a ser usado com `--target-event-fragments` (ex.: `G01`). Se houver apenas um evento disponível (além de `Nothing`), o script pode inferir automaticamente.
 - `--pack-all-fragments`: ativa o modo exaustivo, que consome cada fragmento exatamente uma vez, sem reposição, e distribui os frames entre os splits (`train`/`val`/`test`) conforme o orçamento definido pelas razões de split. Nesse modo, `--sequence-duration` não é usado para limitar as fitas; em vez disso você pode opcionalmente definir `--max-sequence-duration`.
 - `--max-sequence-duration`: (apenas com `--pack-all-fragments`) duração máxima de cada sequência gerada. Se omitido, o script cria **uma sequência por split** contendo todos os frames atribuídos àquele conjunto. Se definido, o builder abre novas sequências sempre que a atual atingiria o limite, mantendo todos os fragmentos (sem truncar) e marcando o manifesto como `pack_all_mode=True`.
 - `--max-fragments-per-sequence`: limite opcional de quantos fragmentos podem ser concatenados. Se atingido, a sequência é finalizada mesmo que a duração alvo não tenha sido alcançada.
@@ -37,7 +39,7 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
      - se só houver `Nothing`, amostra-se dele;
      - se ambos existirem, sorteia-se `Nothing` com peso `nothing_ratio` e os demais labels com peso 1, **exceto** quando o limite de eventos consecutivos (`--max-consecutive-event-fragments` ou `--max-consecutive-event-frames`) foi atingido ou ainda restarem frames pendentes de `Nothing` exigidos por `--min-nothing-after-event-frames` (nesses casos `Nothing` é forçado, se disponível).
    - **Amostragem de fragmento**: seleciona-se aleatoriamente uma linha do pool do label escolhido e carrega-se o `.npy` correspondente. O script ignora fragmentos ausentes ou com `n_frames <= 0`.
-   - **Concatenação temporal**: os fragmentos são empilhados na dimensão temporal (`axis=1`). O processo continua até atingir ou ultrapassar o número de frames alvo derivado de `--sequence-duration`, respeitando `--max-fragments-per-sequence` (quando definido), os limites de consecutivos e o gap mínimo de `Nothing`, além de um limite de tentativas para evitar laços infinitos.
+   - **Concatenação temporal**: os fragmentos são empilhados na dimensão temporal (`axis=1`). O processo continua até atingir ou ultrapassar o número de frames alvo derivado de `--sequence-duration` (ou de `--target-event-fragments`, quando usado), respeitando `--max-fragments-per-sequence` (quando definido), os limites de consecutivos e o gap mínimo de `Nothing`, além de um limite de tentativas para evitar laços infinitos.
    - **Tratamento de fragmentos longos**: por padrão, se um fragmento exceder o orçamento restante de frames, ele é ignorado e outro trecho é sorteado. Com `--allow-partial-fragments`, o fragmento pode ser usado mesmo que ultrapasse o limite; a sequência será truncada no ajuste final, marcando o segmento como truncado.
    - **Ajuste final**: se a sequência exceder os frames alvo, é truncada. Cada segmento recebe `start_frame`, `end_frame`, `start_s`, `end_s` e `truncated` (quando houve corte) calculados a partir de `frame_length`/`hop_length`/`target_sr`.
 4. **Modo exaustivo (`--pack-all-fragments`)**:
@@ -70,6 +72,21 @@ python src/build_dataset.py \
 Este comando gera 20 sequências de aproximadamente 6 s cada, balanceando a seleção de `Nothing` e eventos com `nothing-ratio=0.8`, ignorando a label `NI`, e grava as sequências nas subpastas `train/`, `val/` e `test` de `data/results/sequences`, além do `manifest_sequences.csv` agregado (com coluna `split`).
 
 Para inspecionar rapidamente a linha do tempo e as métricas de composição antes de salvar qualquer arquivo, rode o mesmo comando com `--validate-composition` e `--num-sequences 1` (o flag ignora a escrita em disco e loga a timeline e os percentuais/limites aplicados).
+
+### Duração baseada em eventos (50/50 por frames)
+```bash
+python src/build_dataset.py \
+  --fragments-dir data/results/fragments_combined \
+  --exclude-labels NI \
+  --target-event-fragments 120 \
+  --event-label G01 \
+  --nothing-ratio 1.0 \
+  --num-sequences 3 \
+  --output-dir data/results/sequences_balanced \
+  --seed 7
+```
+
+Neste modo, o builder soma os frames de 120 fragmentos do evento `G01`, duplica esse total para formar o orçamento global (eventos + `Nothing`) e gera as sequências respeitando esse limite. Se houver mais de um label de evento disponível, `--event-label` é obrigatório.
 
 ### Modo exaustivo (sem reposição)
 ```bash

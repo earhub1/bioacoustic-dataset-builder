@@ -59,6 +59,22 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Target duration in seconds for each synthetic sequence.",
     )
     parser.add_argument(
+        "--target-event-fragments",
+        type=int,
+        default=None,
+        help=(
+            "When set, compute the sequence frame budget from the total frames of the first N event fragments "
+            "and aim for a 50/50 Nothing:event balance (target_frames = 2 * frames_event). Requires --event-label "
+            "when multiple event labels exist."
+        ),
+    )
+    parser.add_argument(
+        "--event-label",
+        type=str,
+        default=None,
+        help="Event label to use with --target-event-fragments (e.g., G01).",
+    )
+    parser.add_argument(
         "--pack-all-fragments",
         action="store_true",
         help=(
@@ -851,17 +867,54 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
 
     rng = np.random.default_rng(args.seed)
 
-    target_frames = frames_for_duration(
-        duration_s=args.sequence_duration,
-        sr=args.target_sr,
-        frame_length=args.frame_length,
-        hop_length=args.hop_length,
-    )
-    if target_frames <= 0:
-        raise ValueError("sequence-duration must be positive.")
-
     if args.pack_all_fragments and args.validate_composition:
         raise ValueError("--validate-composition is not supported together with --pack-all-fragments.")
+
+    if args.pack_all_fragments and args.target_event_fragments is not None:
+        raise ValueError("--target-event-fragments is not supported together with --pack-all-fragments.")
+
+    if args.target_event_fragments is not None and args.target_event_fragments <= 0:
+        raise ValueError("--target-event-fragments must be a positive integer.")
+
+    if args.target_event_fragments is not None:
+        event_label = args.event_label
+        if event_label is None:
+            event_candidates = sorted({label for label in df["label"].unique() if label != "Nothing"})
+            if len(event_candidates) == 1:
+                event_label = event_candidates[0]
+                logger.info("Inferred event label '%s' for --target-event-fragments.", event_label)
+            else:
+                raise ValueError(
+                    "--event-label is required when --target-event-fragments is set and multiple event labels exist."
+                )
+        event_df = df[df["label"] == event_label]
+        if event_df.empty:
+            raise ValueError(f"No fragments found for event label '{event_label}'.")
+        if len(event_df) < args.target_event_fragments:
+            raise ValueError(
+                f"Requested {args.target_event_fragments} event fragments but only {len(event_df)} available for '{event_label}'."
+            )
+        event_indices = rng.choice(event_df.index.to_numpy(), size=args.target_event_fragments, replace=False)
+        event_frames = int(event_df.loc[event_indices, "n_frames"].sum())
+        if event_frames <= 0:
+            raise ValueError("Selected event fragments have non-positive frame totals.")
+        target_frames = int(event_frames * 2)
+        logger.info(
+            "Using %d event fragments (%s) totaling %d frames -> target_frames=%d for 50/50 balance.",
+            args.target_event_fragments,
+            event_label,
+            event_frames,
+            target_frames,
+        )
+    else:
+        target_frames = frames_for_duration(
+            duration_s=args.sequence_duration,
+            sr=args.target_sr,
+            frame_length=args.frame_length,
+            hop_length=args.hop_length,
+        )
+        if target_frames <= 0:
+            raise ValueError("sequence-duration must be positive.")
 
     if args.pack_all_fragments:
         return build_sequences_pack_all(args, df, split_labels, split_probs, rng)
