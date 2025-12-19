@@ -12,6 +12,7 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 ## Parâmetros principais
 - `--sequence-duration`: duração alvo (em segundos) de cada sequência gerada no modo padrão de amostragem. O script converte essa duração em número de frames usando `frame_length` e `hop_length` (padrões: 6400 cada, com `target_sr=64000`, equivalendo a ~0,1 s por frame).
 - `--target-event-fragments`: quando definido, o builder seleciona N fragmentos de um label de evento e calcula o orçamento de frames como o dobro do total desses eventos, visando 50/50 entre eventos e `Nothing`. Esse modo substitui `--sequence-duration` e exige `--event-label` quando houver mais de um evento.
+- `--target-event-fragments-train/val/test`: orçamento de fragmentos de evento por split (treino/validação/teste). Exige `--split-by-fragment` e permite garantir 50/50 por frames em cada conjunto.
 - `--event-label`: rótulo do evento a ser usado com `--target-event-fragments` (ex.: `G01`). Se houver apenas um evento disponível (além de `Nothing`), o script pode inferir automaticamente.
 - `--split-by-fragment`: divide os fragmentos em `train`/`val`/`test` **sem reposição** antes da montagem das sequências. A amostragem passa a ocorrer apenas dentro do pool de cada split e um `manifest_split.csv` é salvo em `--output-dir` para manter a divisão fixa.
 - `--pack-all-fragments`: ativa o modo exaustivo, que consome cada fragmento exatamente uma vez, sem reposição, e distribui os frames entre os splits (`train`/`val`/`test`) conforme o orçamento definido pelas razões de split. Nesse modo, `--sequence-duration` não é usado para limitar as fitas; em vez disso você pode opcionalmente definir `--max-sequence-duration`.
@@ -94,6 +95,25 @@ python src/build_dataset.py \
 ```
 
 Neste modo, o builder soma os frames de 120 fragmentos do evento `G01`, duplica esse total para formar o orçamento global (eventos + `Nothing`) e gera as sequências respeitando esse limite. Se houver mais de um label de evento disponível, `--event-label` é obrigatório.
+
+### Orçamento por split (70/20/10 com 50/50 por frames)
+```bash
+python src/build_dataset.py \
+  --fragments-dir data/results/fragments_combined \
+  --exclude-labels NI \
+  --event-label G01 \
+  --target-event-fragments-train 6241 \
+  --target-event-fragments-val 1783 \
+  --target-event-fragments-test 892 \
+  --nothing-ratio 1.0 \
+  --split-by-fragment \
+  --num-sequences 3 \
+  --train-ratio 0.34 --val-ratio 0.33 --test-ratio 0.33 \
+  --output-dir data/results/sequences_balanced \
+  --seed 7
+```
+
+Neste modo, o orçamento de frames é calculado separadamente por split a partir do número de fragmentos de evento. O `manifest_split.csv` garante que nenhum fragmento apareça em mais de um conjunto.
 
 ### Modo exaustivo (sem reposição)
 ```bash
