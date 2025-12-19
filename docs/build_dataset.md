@@ -17,7 +17,14 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 - `--allow-partial-fragments`: por padrão, fragmentos maiores que o orçamento restante são ignorados e um novo trecho é sorteado. Ative esta flag para permitir incluir fragmentos longos mesmo que excedam o alvo; eles serão cortados na etapa final de truncamento.
 - `--num-sequences`: quantas sequências gerar.
 - `--train-ratio`, `--val-ratio`, `--test-ratio`: proporções (padrão 0.7/0.15/0.15) usadas para direcionar cada sequência gerada para as pastas `train/`, `val/` ou `test` sob `--output-dir`. Os valores devem somar 1.0.
+- `--max-consecutive-event-fragments`: máximo de fragmentos de evento consecutivos permitidos (padrão: 3) antes de forçar a inserção de `Nothing` (quando existir pool disponível).
+- `--max-consecutive-event-frames`: limite opcional em frames para eventos consecutivos antes de forçar `Nothing`. Se omitido, o controle é feito apenas por número de fragmentos.
+- `--min-nothing-after-event-frames`: quantidade mínima de frames de `Nothing` exigida logo após um evento antes que outro evento possa ser colocado (padrão: 20 frames). Se o fragmento de `Nothing` exceder esse valor, o excesso simplesmente reduz o orçamento restante.
+- `--allow-partial-fragments`: por padrão, fragmentos maiores que o orçamento restante são ignorados e um novo trecho é sorteado. Ative esta flag para permitir incluir fragmentos longos mesmo que ultrapassem o limite; eles serão cortados na etapa final de truncamento.
+- `--num-sequences`: quantas sequências gerar.
+- `--train-ratio`, `--val-ratio`, `--test-ratio`: proporções (padrão 0.7/0.15/0.15) usadas para direcionar cada sequência gerada para as pastas `train/`, `val/` ou `test` sob `--output-dir`. Os valores devem somar 1.0.
 - `--nothing-ratio`: controla a probabilidade relativa de amostrar fragmentos `Nothing` versus demais labels quando ambos estão disponíveis. Por exemplo, 1.0 tende a um equilíbrio 1:1 entre `Nothing` e eventos; valores menores reduzem a presença de `Nothing`.
+- `--validate-composition`: gera **uma** sequência para inspeção sem salvar arquivos, logando a linha do tempo dos segmentos, métricas de runs e a forma do tensor resultante. Útil para testar combinações de `nothing_ratio` e limites de consecutivos antes de produzir o dataset completo.
 - `--seed`: fixa o gerador pseudoaleatório para que a escolha de trechos e a ordem se repitam entre execuções.
 
 ## Lógica de montagem
@@ -25,12 +32,12 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
    - `snippet_path` pode ser absoluto ou relativo. Se for relativo e o caminho já existir tal como está, ele é usado diretamente; caso contrário, é resolvido em relação à pasta do manifest para evitar duplicar prefixos como `data/results/fragments/...`.
 2. **Pool por label**: o script agrupa os índices das linhas por `label`, mantendo listas de candidatos para amostragem.
 3. **Modo padrão (amostragem com reposição)**:
-   - **Seleção de label**: a cada iteração, escolhe-se um label via `nothing_ratio` (função `pick_label`):
+   - **Seleção de label**: a cada iteração, escolhe-se um label via `nothing_ratio` (função `pick_label`), respeitando os limites de consecutivos e o gap obrigatório de `Nothing`:
      - se só houver eventos (nenhum `Nothing`), amostra-se entre os eventos;
      - se só houver `Nothing`, amostra-se dele;
-     - se ambos existirem, sorteia-se `Nothing` com peso `nothing_ratio` e os demais labels com peso 1.
+     - se ambos existirem, sorteia-se `Nothing` com peso `nothing_ratio` e os demais labels com peso 1, **exceto** quando o limite de eventos consecutivos (`--max-consecutive-event-fragments` ou `--max-consecutive-event-frames`) foi atingido ou ainda restarem frames pendentes de `Nothing` exigidos por `--min-nothing-after-event-frames` (nesses casos `Nothing` é forçado, se disponível).
    - **Amostragem de fragmento**: seleciona-se aleatoriamente uma linha do pool do label escolhido e carrega-se o `.npy` correspondente. O script ignora fragmentos ausentes ou com `n_frames <= 0`.
-   - **Concatenação temporal**: os fragmentos são empilhados na dimensão temporal (`axis=1`). O processo continua até atingir ou ultrapassar o número de frames alvo derivado de `--sequence-duration`, respeitando `--max-fragments-per-sequence` (quando definido) e um limite de tentativas para evitar laços infinitos.
+   - **Concatenação temporal**: os fragmentos são empilhados na dimensão temporal (`axis=1`). O processo continua até atingir ou ultrapassar o número de frames alvo derivado de `--sequence-duration`, respeitando `--max-fragments-per-sequence` (quando definido), os limites de consecutivos e o gap mínimo de `Nothing`, além de um limite de tentativas para evitar laços infinitos.
    - **Tratamento de fragmentos longos**: por padrão, se um fragmento exceder o orçamento restante de frames, ele é ignorado e outro trecho é sorteado. Com `--allow-partial-fragments`, o fragmento pode ser usado mesmo que ultrapasse o limite; a sequência será truncada no ajuste final, marcando o segmento como truncado.
    - **Ajuste final**: se a sequência exceder os frames alvo, é truncada. Cada segmento recebe `start_frame`, `end_frame`, `start_s`, `end_s` e `truncated` (quando houve corte) calculados a partir de `frame_length`/`hop_length`/`target_sr`.
 4. **Modo exaustivo (`--pack-all-fragments`)**:
@@ -41,8 +48,8 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 ## Saídas
 - **Sequências**: salvas como `.npy` em subpastas de split sob `--output-dir` (padrão `data/results/sequences/{train,val,test}`) com o padrão `sequence_<n>.npy`. Cada arquivo contém um tensor de features concatenadas (mesma dimensão de frequência dos fragmentos de entrada).
 - **Manifestos**:
-  - `manifest_sequences_summary.csv`: resumo por fita, salvo na raiz de `--output-dir` (e em cada subpasta de split). Colunas: `sequence_path`, `sequence_idx`, `split`, `total_frames`, `total_duration_s`, `n_segments`, `pack_all_mode`, `seed`, `skipped_too_long`, `fragment_limit_reached`, `truncated_segments`.
-  - `manifest_sequences.csv`: manifesto detalhado por **segmento**, salvo na raiz (e por split). Cada linha indica um trecho dentro de uma sequência com: `sequence_path`, `sequence_idx`, `split`, `segment_idx`, `label`, `snippet_path`, `start_frame`, `end_frame`, `duration_frames`, `start_s`, `end_s`, `duration_s`, `truncated`. Esse formato gera uma linha por trecho, facilitando auditoria e análises posteriores.
+  - `manifest_sequences_summary.csv`: resumo por fita, salvo na raiz de `--output-dir` (e em cada subpasta de split). Colunas principais: `sequence_path`, `sequence_idx`, `split`, `total_frames`, `total_duration_s`, `n_segments`, `pack_all_mode`, `seed`, `skipped_too_long`, `fragment_limit_reached`, `truncated_segments`, `feature_type`, `mel_bins`, `db_ref`, `top_db`, `frames_by_label` (JSON), `frames_nothing`, `frames_events`, `pct_nothing`, `pct_events`, `max_event_run_frames`, `max_event_run_seconds`, `max_event_run_fragments`, `num_event_runs`.
+  - `manifest_sequences.csv`: manifesto detalhado por **segmento**, salvo na raiz (e por split). Cada linha indica um trecho dentro de uma sequência com: `sequence_path`, `sequence_idx`, `split`, `segment_idx`, `label`, `snippet_path`, `start_frame`, `end_frame`, `duration_frames`, `start_s`, `end_s`, `duration_s`, `truncated`, `feature_type`, `mel_bins`. Esse formato gera uma linha por trecho, facilitando auditoria e análises posteriores.
 
 ## Exemplos de uso
 ### Modo padrão (amostragem)
@@ -52,6 +59,8 @@ python src/build_dataset.py \
   --exclude-labels NI \
   --sequence-duration 6.0 \
   --nothing-ratio 0.8 \
+  --max-consecutive-event-fragments 3 \
+  --min-nothing-after-event-frames 25 \
   --num-sequences 20 \
   --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1 \
   --output-dir data/results/sequences \
@@ -59,6 +68,8 @@ python src/build_dataset.py \
 ```
 
 Este comando gera 20 sequências de aproximadamente 6 s cada, balanceando a seleção de `Nothing` e eventos com `nothing-ratio=0.8`, ignorando a label `NI`, e grava as sequências nas subpastas `train/`, `val/` e `test` de `data/results/sequences`, além do `manifest_sequences.csv` agregado (com coluna `split`).
+
+Para inspecionar rapidamente a linha do tempo e as métricas de composição antes de salvar qualquer arquivo, rode o mesmo comando com `--validate-composition` e `--num-sequences 1` (o flag ignora a escrita em disco e loga a timeline e os percentuais/limites aplicados).
 
 ### Modo exaustivo (sem reposição)
 ```bash

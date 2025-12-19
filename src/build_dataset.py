@@ -9,6 +9,7 @@ reproducible sampling.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -84,6 +85,30 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max-consecutive-event-fragments",
+        type=int,
+        default=3,
+        help=(
+            "Maximum number of consecutive event fragments before forcing insertion of Nothing (when available)."
+        ),
+    )
+    parser.add_argument(
+        "--max-consecutive-event-frames",
+        type=int,
+        default=None,
+        help=(
+            "Optional cap on consecutive event frames before forcing insertion of Nothing (when available)."
+        ),
+    )
+    parser.add_argument(
+        "--min-nothing-after-event-frames",
+        type=int,
+        default=20,
+        help=(
+            "Minimum frames of Nothing required after an event before allowing another event fragment."
+        ),
+    )
+    parser.add_argument(
         "--num-sequences",
         type=int,
         default=10,
@@ -146,6 +171,13 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=int,
         default=6400,
         help="Hop length in samples (match the extractor).",
+    )
+    parser.add_argument(
+        "--validate-composition",
+        action="store_true",
+        help=(
+            "Generate a single sequence for inspection without saving files, logging the timeline and run metrics."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -287,6 +319,66 @@ def pick_label(label_pools: Dict[str, List[int]], rng: np.random.Generator, noth
     return rng.choice(non_nothing_labels)
 
 
+def select_row_for_label(
+    df: pd.DataFrame, label_pools: Dict[str, List[int]], label: str, rng: np.random.Generator
+) -> Optional[pd.Series]:
+    pool_indices = label_pools.get(label, [])
+    if not pool_indices:
+        return None
+    row_idx = pool_indices[rng.integers(0, len(pool_indices))]
+    return df.loc[row_idx]
+
+
+def compute_composition_stats(
+    segments: List[dict], total_frames: int, sr: int, frame_length: int, hop_length: int
+) -> dict:
+    frames_by_label: Dict[str, int] = {}
+    current_run_frames = 0
+    current_run_fragments = 0
+    max_event_run_frames = 0
+    max_event_run_fragments = 0
+    num_event_runs = 0
+    in_event_run = False
+
+    for seg in sorted(segments, key=lambda s: s.get("start_frame", 0)):
+        label = seg["label"]
+        duration_frames = int(seg["end_frame"] - seg["start_frame"])
+        frames_by_label[label] = frames_by_label.get(label, 0) + duration_frames
+        is_event = label != "Nothing"
+
+        if is_event:
+            if not in_event_run:
+                num_event_runs += 1
+                current_run_frames = 0
+                current_run_fragments = 0
+            in_event_run = True
+            current_run_frames += duration_frames
+            current_run_fragments += 1
+            max_event_run_frames = max(max_event_run_frames, current_run_frames)
+            max_event_run_fragments = max(max_event_run_fragments, current_run_fragments)
+        else:
+            in_event_run = False
+            current_run_frames = 0
+            current_run_fragments = 0
+
+    frames_nothing = frames_by_label.get("Nothing", 0)
+    frames_events = max(total_frames - frames_nothing, 0)
+    pct_nothing = frames_nothing / total_frames if total_frames > 0 else 0.0
+    pct_events = frames_events / total_frames if total_frames > 0 else 0.0
+
+    return {
+        "frames_by_label": json.dumps(frames_by_label, ensure_ascii=False),
+        "frames_nothing": frames_nothing,
+        "frames_events": frames_events,
+        "pct_nothing": pct_nothing,
+        "pct_events": pct_events,
+        "max_event_run_frames": max_event_run_frames,
+        "max_event_run_seconds": frames_to_seconds(max_event_run_frames, sr, frame_length, hop_length),
+        "max_event_run_fragments": max_event_run_fragments,
+        "num_event_runs": num_event_runs,
+    }
+
+
 def build_sequence(
     df: pd.DataFrame,
     target_frames: int,
@@ -298,6 +390,9 @@ def build_sequence(
     rng: np.random.Generator,
     max_fragments: Optional[int] = None,
     allow_partial_fragments: bool = False,
+    max_consecutive_event_fragments: Optional[int] = None,
+    max_consecutive_event_frames: Optional[int] = None,
+    min_nothing_after_event_frames: int = 0,
 ) -> tuple[np.ndarray, List[dict], dict]:
     label_pools: Dict[str, List[int]] = {}
     for idx, row in df.iterrows():
@@ -311,22 +406,69 @@ def build_sequence(
     skipped_too_long = 0
     fragment_limit_reached = False
 
+    current_run_frames = 0
+    current_run_fragments = 0
+    gap_frames_remaining = 0
+    in_event_run = False
+    max_event_run_frames = 0
+    max_event_run_fragments = 0
+    num_event_runs = 0
+
     while current_frames < target_frames and attempts < max_attempts:
         if max_fragments is not None and len(segments) >= max_fragments:
             fragment_limit_reached = True
             break
 
         attempts += 1
-        label = pick_label(label_pools, rng, nothing_ratio)
+        has_nothing_pool = bool(label_pools.get("Nothing"))
+        force_nothing = False
+        if gap_frames_remaining > 0:
+            force_nothing = True
+        if max_consecutive_event_fragments is not None and max_consecutive_event_fragments >= 0:
+            if current_run_fragments >= max_consecutive_event_fragments:
+                force_nothing = True
+        if max_consecutive_event_frames is not None and max_consecutive_event_frames >= 0:
+            if current_run_frames >= max_consecutive_event_frames:
+                force_nothing = True
+
+        if force_nothing and has_nothing_pool:
+            label = "Nothing"
+        else:
+            label = pick_label(label_pools, rng, nothing_ratio)
+
         if label is None:
             break
 
-        pool_indices = label_pools.get(label, [])
-        if not pool_indices:
+        row = select_row_for_label(df, label_pools, label, rng)
+        if row is None:
             continue
 
-        row_idx = pool_indices[rng.integers(0, len(pool_indices))]
-        row = df.loc[row_idx]
+        # If event run constraints would be violated, switch to Nothing when possible.
+        if label != "Nothing" and has_nothing_pool:
+            prospective_frames = current_run_frames + int(row["n_frames"])
+            prospective_frags = current_run_fragments + 1
+            exceeds_frames = (
+                max_consecutive_event_frames is not None
+                and max_consecutive_event_frames >= 0
+                and prospective_frames > max_consecutive_event_frames
+            )
+            exceeds_frags = (
+                max_consecutive_event_fragments is not None
+                and max_consecutive_event_fragments >= 0
+                and prospective_frags > max_consecutive_event_fragments
+            )
+            if exceeds_frames or exceeds_frags or gap_frames_remaining > 0:
+                label = "Nothing"
+                row = select_row_for_label(df, label_pools, label, rng)
+                if row is None:
+                    # Fall back to the original event if Nothing pool is empty
+                    label = pick_label(label_pools, rng, nothing_ratio)
+                    if label is None:
+                        break
+                    row = select_row_for_label(df, label_pools, label, rng)
+                    if row is None:
+                        continue
+
         manifest_dir = Path(row["_manifest_dir"])
         snippet_path = resolve_snippet_path(str(row["snippet_path"]), manifest_dir)
         if not snippet_path.exists():
@@ -368,6 +510,23 @@ def build_sequence(
             }
         )
 
+        if label != "Nothing":
+            if not in_event_run:
+                num_event_runs += 1
+                current_run_frames = 0
+                current_run_fragments = 0
+                in_event_run = True
+            current_run_frames += n_frames
+            current_run_fragments += 1
+            max_event_run_frames = max(max_event_run_frames, current_run_frames)
+            max_event_run_fragments = max(max_event_run_fragments, current_run_fragments)
+            gap_frames_remaining = max(min_nothing_after_event_frames, 0)
+        else:
+            gap_frames_remaining = max(gap_frames_remaining - n_frames, 0)
+            in_event_run = False
+            current_run_frames = 0
+            current_run_fragments = 0
+
         current_frames = end_frame
 
     if not feature_chunks:
@@ -399,11 +558,16 @@ def build_sequence(
             }
         )
 
+    composition_stats = compute_composition_stats(
+        trimmed_segments, total_frames=combined.shape[1], sr=sr, frame_length=frame_length, hop_length=hop_length
+    )
+
     return combined, trimmed_segments, {
         "skipped_too_long": skipped_too_long,
         "fragment_limit_reached": fragment_limit_reached,
         "truncated_segments": truncated_segments,
         "pack_all_mode": False,
+        "composition": composition_stats,
     }
 
 
@@ -570,6 +734,13 @@ def build_sequences_pack_all(
             features, seq_segments, truncated_segments = finalize_sequence_chunks(
                 chunks, segments, args.target_sr, args.frame_length, args.hop_length
             )
+            composition_stats = compute_composition_stats(
+                seq_segments,
+                total_frames=features.shape[1],
+                sr=args.target_sr,
+                frame_length=args.frame_length,
+                hop_length=args.hop_length,
+            )
             summary_record, segment_list = save_sequence(
                 output_dir=split_dir,
                 sequence_idx=sequence_idx,
@@ -593,6 +764,7 @@ def build_sequences_pack_all(
                     "truncated_segments": truncated_segments,
                 }
             )
+            summary_record.update(composition_stats)
             summary_records.append(summary_record)
             segment_records.extend(segment_list)
             sequence_idx += 1
@@ -679,9 +851,6 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
 
     rng = np.random.default_rng(args.seed)
 
-    if args.pack_all_fragments:
-        return build_sequences_pack_all(args, df, split_labels, split_probs, rng)
-
     target_frames = frames_for_duration(
         duration_s=args.sequence_duration,
         sr=args.target_sr,
@@ -691,8 +860,46 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     if target_frames <= 0:
         raise ValueError("sequence-duration must be positive.")
 
+    if args.pack_all_fragments and args.validate_composition:
+        raise ValueError("--validate-composition is not supported together with --pack-all-fragments.")
+
+    if args.pack_all_fragments:
+        return build_sequences_pack_all(args, df, split_labels, split_probs, rng)
+
     summary_records: List[dict] = []
     segment_records: List[dict] = []
+
+    if args.validate_composition:
+        features, segments, meta = build_sequence(
+            df=df,
+            target_frames=target_frames,
+            sr=args.target_sr,
+            frame_length=args.frame_length,
+            hop_length=args.hop_length,
+            expected_n_mels=args.expected_n_mels,
+            nothing_ratio=args.nothing_ratio,
+            rng=rng,
+            max_fragments=args.max_fragments_per_sequence,
+            allow_partial_fragments=args.allow_partial_fragments,
+            max_consecutive_event_fragments=args.max_consecutive_event_fragments,
+            max_consecutive_event_frames=args.max_consecutive_event_frames,
+            min_nothing_after_event_frames=args.min_nothing_after_event_frames,
+        )
+
+        logger.info("Validation timeline (label, start_frame -> end_frame, truncated):")
+        for seg in segments:
+            logger.info(
+                "  %s: %d -> %d (truncated=%s)",
+                seg["label"],
+                int(seg["start_frame"]),
+                int(seg["end_frame"]),
+                bool(seg.get("truncated", False)),
+            )
+
+        composition = meta.get("composition", {})
+        logger.info("Composition metrics: %s", composition)
+        logger.info("Generated validation sequence with shape %s", features.shape)
+        return pd.DataFrame([composition])
 
     for seq_idx in range(args.num_sequences):
         features, segments, meta = build_sequence(
@@ -706,6 +913,9 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             rng=rng,
             max_fragments=args.max_fragments_per_sequence,
             allow_partial_fragments=args.allow_partial_fragments,
+            max_consecutive_event_fragments=args.max_consecutive_event_fragments,
+            max_consecutive_event_frames=args.max_consecutive_event_frames,
+            min_nothing_after_event_frames=args.min_nothing_after_event_frames,
         )
 
         split = rng.choice(split_labels, p=split_probs)
@@ -734,6 +944,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                 "truncated_segments": meta["truncated_segments"],
             }
         )
+        summary_record.update(meta.get("composition", {}))
         summary_records.append(summary_record)
         segment_records.extend(seq_segments)
 
