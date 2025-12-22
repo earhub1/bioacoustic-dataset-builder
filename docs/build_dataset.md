@@ -15,6 +15,7 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
 - `--target-event-fragments-train/val/test`: orçamento de fragmentos de evento por split (treino/validação/teste). Exige `--split-by-fragment` e permite garantir 50/50 por frames em cada conjunto.
 - `--event-label`: rótulo do evento a ser usado com `--target-event-fragments` (ex.: `G01`). Se houver apenas um evento disponível (além de `Nothing`), o script pode inferir automaticamente.
 - `--split-by-fragment`: divide os fragmentos em `train`/`val`/`test` **sem reposição** antes da montagem das sequências. A amostragem passa a ocorrer apenas dentro do pool de cada split e um `manifest_split.csv` é salvo em `--output-dir` para manter a divisão fixa.
+- `--split-by-event-fragments`: divide primeiro os fragmentos do `event_label` (e os demais labels) em `train`/`val`/`test` sem reposição, calcula o orçamento de frames por split a partir dos eventos e completa com `Nothing` até 50/50 em frames. Também grava `manifest_split.csv`.
 - `--pack-all-fragments`: ativa o modo exaustivo, que consome cada fragmento exatamente uma vez, sem reposição, e distribui os frames entre os splits (`train`/`val`/`test`) conforme o orçamento definido pelas razões de split. Nesse modo, `--sequence-duration` não é usado para limitar as fitas; em vez disso você pode opcionalmente definir `--max-sequence-duration`.
 - `--max-sequence-duration`: (apenas com `--pack-all-fragments`) duração máxima de cada sequência gerada. Se omitido, o script cria **uma sequência por split** contendo todos os frames atribuídos àquele conjunto. Se definido, o builder abre novas sequências sempre que a atual atingiria o limite, mantendo todos os fragmentos (sem truncar) e marcando o manifesto como `pack_all_mode=True`.
 - `--max-fragments-per-sequence`: limite opcional de quantos fragmentos podem ser concatenados. Se atingido, a sequência é finalizada mesmo que a duração alvo não tenha sido alcançada.
@@ -46,6 +47,10 @@ O `build_dataset.py` lê um ou mais `manifest.csv` produzidos pelo extrator, car
    - Antes de montar as sequências, o builder embaralha os fragmentos e os distribui em `train`/`val`/`test` sem reposição, conforme `train_ratio/val_ratio/test_ratio`.
    - A amostragem passa a ocorrer **apenas** dentro do pool do split correspondente, evitando que um mesmo fragmento apareça em treino e validação/teste.
    - Um `manifest_split.csv` é gravado em `--output-dir` para manter a divisão fixa e auditável.
+5. **Split por eventos (`--split-by-event-fragments`)**:
+   - O builder divide os fragmentos do `event_label` (e os demais labels) em `train`/`val`/`test` sem reposição.
+   - Para cada split, o orçamento de frames é calculado a partir do total de frames do `event_label` daquele split, e o `Nothing` completa até atingir 50/50.
+   - A amostragem ocorre apenas dentro do split, evitando vazamento entre treino/val/teste.
    - **Tratamento de fragmentos longos**: por padrão, se um fragmento exceder o orçamento restante de frames, ele é ignorado e outro trecho é sorteado. Com `--allow-partial-fragments`, o fragmento pode ser usado mesmo que ultrapasse o limite; a sequência será truncada no ajuste final, marcando o segmento como truncado.
    - **Ajuste final**: se a sequência exceder os frames alvo, é truncada. Cada segmento recebe `start_frame`, `end_frame`, `start_s`, `end_s` e `truncated` (quando houve corte) calculados a partir de `frame_length`/`hop_length`/`target_sr`.
 4. **Modo exaustivo (`--pack-all-fragments`)**:
@@ -114,6 +119,22 @@ python src/build_dataset.py \
 ```
 
 Neste modo, o orçamento de frames é calculado separadamente por split a partir do número de fragmentos de evento. O `manifest_split.csv` garante que nenhum fragmento apareça em mais de um conjunto.
+
+### Split por eventos (50/50 por split sem vazamento)
+```bash
+python src/build_dataset.py \
+  --fragments-dir data/results/fragments_combined \
+  --exclude-labels NI \
+  --event-label G01 \
+  --nothing-ratio 1.0 \
+  --split-by-event-fragments \
+  --num-sequences 3 \
+  --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1 \
+  --output-dir data/results/sequences_balanced \
+  --seed 7
+```
+
+Neste modo, os eventos são divididos primeiro entre os splits e o orçamento 50/50 é calculado separadamente para cada conjunto, mantendo a separação sem vazamento.
 
 ### Modo exaustivo (sem reposição)
 ```bash

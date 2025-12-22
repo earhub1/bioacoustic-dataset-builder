@@ -67,6 +67,14 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--split-by-event-fragments",
+        action="store_true",
+        help=(
+            "Split event fragments (plus other labels) into train/val/test without replacement, "
+            "compute per-split frame budgets from the event_label, and sample only within each split."
+        ),
+    )
+    parser.add_argument(
         "--target-event-fragments",
         type=int,
         default=None,
@@ -705,6 +713,21 @@ def allocate_fragments_by_split(
     return assignments, budgets
 
 
+def assign_splits_by_ratio(
+    df: pd.DataFrame, split_labels: list[str], split_probs: np.ndarray, rng: np.random.Generator
+) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=str)
+    total = len(df)
+    counts = [int(total * p) for p in split_probs]
+    counts[-1] += total - sum(counts)
+    indices = rng.permutation(df.index.to_numpy())
+    split_assignments: List[str] = []
+    for split, count in zip(split_labels, counts):
+        split_assignments.extend([split] * count)
+    return pd.Series(split_assignments, index=indices)
+
+
 def finalize_sequence_chunks(
     chunks: List[np.ndarray],
     segments: List[dict],
@@ -903,12 +926,21 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     if args.pack_all_fragments and args.split_by_fragment:
         raise ValueError("--split-by-fragment is not supported together with --pack-all-fragments.")
 
+    if args.pack_all_fragments and args.split_by_event_fragments:
+        raise ValueError("--split-by-event-fragments is not supported together with --pack-all-fragments.")
+
     split_target_values = {
         "train": args.target_event_fragments_train,
         "val": args.target_event_fragments_val,
         "test": args.target_event_fragments_test,
     }
     using_split_targets = any(value is not None for value in split_target_values.values())
+
+    if args.split_by_event_fragments and args.split_by_fragment:
+        raise ValueError("--split-by-event-fragments cannot be combined with --split-by-fragment.")
+
+    if args.split_by_event_fragments and using_split_targets:
+        raise ValueError("--split-by-event-fragments cannot be combined with per-split target-event-fragments.")
 
     if using_split_targets and args.target_event_fragments is not None:
         raise ValueError("Per-split target-event-fragments cannot be combined with --target-event-fragments.")
@@ -925,7 +957,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                 raise ValueError(f"--target-event-fragments-{split} must be a positive integer.")
 
     event_label = args.event_label
-    if args.target_event_fragments is not None or using_split_targets:
+    if args.target_event_fragments is not None or using_split_targets or args.split_by_event_fragments:
         if event_label is None:
             event_candidates = sorted({label for label in df["label"].unique() if label != "Nothing"})
             if len(event_candidates) == 1:
@@ -956,7 +988,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             event_frames,
             target_frames,
         )
-    elif not using_split_targets:
+    elif not using_split_targets and not args.split_by_event_fragments:
         target_frames = frames_for_duration(
             duration_s=args.sequence_duration,
             sr=args.target_sr,
@@ -973,6 +1005,40 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
 
     summary_records: List[dict] = []
     segment_records: List[dict] = []
+
+    split_by_pool = args.split_by_fragment or args.split_by_event_fragments
+
+    if args.split_by_event_fragments:
+        ensure_output_dir(args.output_dir)
+        split_assignments = pd.Series(index=df.index, dtype=str)
+        for label in df["label"].unique():
+            label_df = df[df["label"] == label]
+            label_splits = assign_splits_by_ratio(label_df, split_labels, split_probs, rng)
+            split_assignments.loc[label_splits.index] = label_splits.values
+        if split_assignments.isnull().any():
+            raise ValueError("Unable to assign splits for all fragments when using --split-by-event-fragments.")
+        df = df.copy()
+        df["split"] = split_assignments.values
+        split_manifest_path = args.output_dir / "manifest_split.csv"
+        df.to_csv(split_manifest_path, index=False)
+        logger.info("Saved split manifest with %d fragments to %s", len(df), split_manifest_path)
+
+        event_df = df[df["label"] == event_label]
+        for split in split_labels:
+            split_event = event_df[event_df["split"] == split]
+            if split_probs[split_labels.index(split)] > 0 and split_event.empty:
+                raise ValueError(f"No fragments found for event label '{event_label}' in split '{split}'.")
+            event_frames = int(split_event["n_frames"].sum())
+            if event_frames <= 0 and split_probs[split_labels.index(split)] > 0:
+                raise ValueError(f"Event fragments in split '{split}' have non-positive frame totals.")
+            target_frames_by_split[split] = int(event_frames * 2)
+            logger.info(
+                "Split %s: event_label=%s frames=%d -> target_frames=%d.",
+                split,
+                event_label,
+                event_frames,
+                target_frames_by_split[split],
+            )
 
     if args.split_by_fragment:
         ensure_output_dir(args.output_dir)
@@ -1017,7 +1083,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                 )
 
     if args.validate_composition:
-        if args.split_by_fragment:
+        if split_by_pool:
             df = df[df["split"] == split_labels[0]]
             if df.empty:
                 raise ValueError(f"No fragments available for split '{split_labels[0]}' to validate.")
@@ -1054,7 +1120,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
         logger.info("Generated validation sequence with shape %s", features.shape)
         return pd.DataFrame([composition])
 
-    if args.split_by_fragment:
+    if split_by_pool:
         seq_counts = [int(args.num_sequences * p) for p in split_probs]
         seq_counts[-1] += args.num_sequences - sum(seq_counts)
         seq_idx = 0

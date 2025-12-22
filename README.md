@@ -85,7 +85,7 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
 
 1. **Escolha os fragmentos de entrada**: defina os diretórios com `manifest.csv` resultantes da extração (padrão: `data/results/fragments`). Use `--fragments-dir` múltiplas vezes se quiser combinar fontes.
 2. **Filtre labels**: por padrão, `NI` é excluído. Para incluir/excluir explicitamente, use `--include-labels` e/ou `--exclude-labels`.
-3. **Defina duração, balanceamento e splits**: use `--sequence-duration` para a duração alvo (s) e `--nothing-ratio` para controlar a razão Nothing:eventos (ex.: 1.0 ≈ 1:1 quando ambos existem). Ajuste `--num-sequences` para quantas fitas deseja. Se quiser definir a duração com base em N fragmentos de um evento específico para garantir 50/50 por frames, use `--target-event-fragments` junto de `--event-label` (isso substitui `--sequence-duration`). Para ter orçamentos específicos por split (70/20/10 com 50/50 por frames), use `--target-event-fragments-train/val/test` em conjunto com `--split-by-fragment`. Se precisar limitar quantos trechos entram em cada sequência, use `--max-fragments-per-sequence`; para aceitar fragmentos maiores que o orçamento restante, ative `--allow-partial-fragments` (por padrão eles são descartados e um novo trecho é sorteado). Para evitar “runs” longos de eventos e garantir bordas de Nothing, use `--max-consecutive-event-fragments`/`--max-consecutive-event-frames` e `--min-nothing-after-event-frames`. Se quiser garantir que nenhum fragmento apareça em mais de um split, ative `--split-by-fragment` (gera `manifest_split.csv` e limita a amostragem ao pool de cada split). Controle o split de saída com `--train-ratio`, `--val-ratio` e `--test-ratio` (padrão 0.7/0.15/0.15); as sequências serão gravadas em subpastas `train/`, `val/` e `test` sob `--output-dir`.
+3. **Defina duração, balanceamento e splits**: use `--sequence-duration` para a duração alvo (s) e `--nothing-ratio` para controlar a razão Nothing:eventos (ex.: 1.0 ≈ 1:1 quando ambos existem). Ajuste `--num-sequences` para quantas fitas deseja. Se quiser definir a duração com base em N fragmentos de um evento específico para garantir 50/50 por frames, use `--target-event-fragments` junto de `--event-label` (isso substitui `--sequence-duration`). Para ter orçamentos específicos por split (70/20/10 com 50/50 por frames), use `--target-event-fragments-train/val/test` em conjunto com `--split-by-fragment`. Se precisar limitar quantos trechos entram em cada sequência, use `--max-fragments-per-sequence`; para aceitar fragmentos maiores que o orçamento restante, ative `--allow-partial-fragments` (por padrão eles são descartados e um novo trecho é sorteado). Para evitar “runs” longos de eventos e garantir bordas de Nothing, use `--max-consecutive-event-fragments`/`--max-consecutive-event-frames` e `--min-nothing-after-event-frames`. Se quiser garantir que nenhum fragmento apareça em mais de um split, ative `--split-by-fragment` (gera `manifest_split.csv` e limita a amostragem ao pool de cada split). Se quiser garantir splits sem vazamento baseados nos eventos, use `--split-by-event-fragments` (divide os eventos primeiro e calcula o orçamento 50/50 por split). Controle o split de saída com `--train-ratio`, `--val-ratio` e `--test-ratio` (padrão 0.7/0.15/0.15); as sequências serão gravadas em subpastas `train/`, `val/` e `test` sob `--output-dir`.
 4. **Gere as sequências (modo padrão)**:
    ```bash
   python src/build_dataset.py \
@@ -128,7 +128,20 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
      --output-dir data/results/sequences_balanced \
      --seed 7
    ```
-7. **(Opcional) Modo exaustivo**: se quiser usar todos os fragmentos uma única vez, sem reposição, e alocar frames por orçamento de split, execute com `--pack-all-fragments`. Inclua `--max-sequence-duration` para abrir novas fitas quando a atual atingir esse limite; se omitir, será gerada uma única sequência por split com todos os frames atribuídos. Exemplo:
+7. **(Opcional) Split por eventos (sem vazamento, 50/50 por split)**: divida primeiro os eventos e deixe o builder calcular o orçamento de frames por split automaticamente:
+   ```bash
+   python src/build_dataset.py \
+     --fragments-dir data/results/fragments_combined \
+     --exclude-labels NI \
+     --event-label G01 \
+     --nothing-ratio 1.0 \
+     --split-by-event-fragments \
+     --num-sequences 3 \
+     --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1 \
+     --output-dir data/results/sequences_balanced \
+     --seed 7
+   ```
+8. **(Opcional) Modo exaustivo**: se quiser usar todos os fragmentos uma única vez, sem reposição, e alocar frames por orçamento de split, execute com `--pack-all-fragments`. Inclua `--max-sequence-duration` para abrir novas fitas quando a atual atingir esse limite; se omitir, será gerada uma única sequência por split com todos os frames atribuídos. Exemplo:
    ```bash
    python src/build_dataset.py \
      --fragments-dir data/results/fragments_combined \
@@ -139,12 +152,12 @@ Após extrair os fragmentos em `.npy`, você pode criar “fitas” sintéticas 
      --output-dir data/results/sequences_pack_all \
      --seed 7
    ```
-8. **Saídas**:
+9. **Saídas**:
    - Sequências salvas como `.npy` em `data/results/sequences/{train,val,test}/sequence_<n>.npy`.
    - `manifest_sequences_summary.csv` na raiz de `data/results/sequences` e por split, com uma linha por fita: `sequence_path`, `sequence_idx`, `split`, `total_duration_s`, `total_frames`, `n_segments`, `seed`, `skipped_too_long`, `fragment_limit_reached`, `truncated_segments`, `pack_all_mode`, `feature_type`, `mel_bins`, `db_ref`, `top_db`, `frames_by_label` (JSON), `frames_nothing`, `frames_events`, `pct_nothing`, `pct_events`, `max_event_run_frames`, `max_event_run_seconds`, `max_event_run_fragments`, `num_event_runs`.
    - `manifest_sequences.csv` (manifesto por segmento) na raiz de `data/results/sequences` e por split, com uma linha por trecho usado: `sequence_path`, `sequence_idx`, `split`, `segment_idx`, `label`, `snippet_path`, `start_frame`, `end_frame`, `duration_frames`, `start_s`, `end_s`, `duration_s`, `truncated`, `feature_type`, `mel_bins`.
    - Para carregar as fitas log-mel em dB nos modelos e aplicar normalização depois do load, consulte a seção “Como consumir as saídas no treinamento” em `docs/build_dataset.md`.
-9. **(Opcional) Visualizar sequências**: use `python src/visualize_sequence_colormesh.py` para gerar um colormesh das fitas (freq x frames) acompanhado de uma faixa binária Nothing(0)/evento(1). Você pode filtrar por `sequence_idx`, `segment_idx` e split, e limitar a janela com `--max-plot-duration` (10 fps por padrão com `hop_length=6400` e `target_sr=64000`). Consulte `docs/visualize_sequences.md` para exemplos.
+10. **(Opcional) Visualizar sequências**: use `python src/visualize_sequence_colormesh.py` para gerar um colormesh das fitas (freq x frames) acompanhado de uma faixa binária Nothing(0)/evento(1). Você pode filtrar por `sequence_idx`, `segment_idx` e split, e limitar a janela com `--max-plot-duration` (10 fps por padrão com `hop_length=6400` e `target_sr=64000`). Consulte `docs/visualize_sequences.md` para exemplos.
 
 ## Próximos passos
 - A partir dos fragmentos extraídos, você pode aplicar rotinas de balanceamento, split de treino/validação/teste e data augmentation conforme as necessidades do modelo alvo.
