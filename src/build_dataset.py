@@ -537,13 +537,14 @@ def build_sequence(
         remaining_frames = target_frames - current_frames
         if remaining_frames <= 0:
             break
-        if n_frames > remaining_frames and not allow_partial_fragments:
+        allow_partial = allow_partial_fragments and label == "Nothing"
+        if n_frames > remaining_frames and not allow_partial:
             skipped_too_long += 1
             continue
 
         truncated = False
         original_end_frame = current_frames + n_frames
-        if n_frames > remaining_frames and allow_partial_fragments:
+        if n_frames > remaining_frames and allow_partial:
             features = features[:, :remaining_frames]
             n_frames = features.shape[1]
             truncated = True
@@ -599,7 +600,7 @@ def build_sequence(
         truncated_flag = bool(seg.get("truncated", False)) or end_frame < seg.get(
             "original_end_frame", seg["end_frame"]
         )
-        if truncated_flag:
+        if truncated_flag and seg.get("label") == "Nothing":
             truncated_segments += 1
         trimmed_segments.append(
             {
@@ -960,7 +961,12 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                 raise ValueError(f"--target-event-fragments-{split} must be a positive integer.")
 
     event_label = args.event_label
-    if args.target_event_fragments is not None or using_split_targets or args.split_by_event_fragments:
+    if (
+        args.target_event_fragments is not None
+        or using_split_targets
+        or args.split_by_event_fragments
+        or args.split_by_fragment
+    ):
         if event_label is None:
             event_candidates = sorted({label for label in df["label"].unique() if label != "Nothing"})
             if len(event_candidates) == 1:
@@ -1080,6 +1086,25 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                     "Split %s: using %d event fragments (%s) totaling %d frames -> target_frames=%d.",
                     split,
                     target_count,
+                    event_label,
+                    event_frames,
+                    target_frames_by_split[split],
+                )
+        else:
+            if event_label is None:
+                raise ValueError("--event-label is required to compute per-split target frames.")
+            for split in split_labels:
+                split_df = df[df["split"] == split]
+                event_df = split_df[split_df["label"] == event_label]
+                if split_probs[split_labels.index(split)] > 0 and event_df.empty:
+                    raise ValueError(f"No fragments found for event label '{event_label}' in split '{split}'.")
+                event_frames = int(event_df["n_frames"].sum())
+                if event_frames <= 0 and split_probs[split_labels.index(split)] > 0:
+                    raise ValueError(f"Event fragments in split '{split}' have non-positive frame totals.")
+                target_frames_by_split[split] = int(event_frames * 2)
+                logger.info(
+                    "Split %s: event_label=%s frames=%d -> target_frames=%d.",
+                    split,
                     event_label,
                     event_frames,
                     target_frames_by_split[split],
