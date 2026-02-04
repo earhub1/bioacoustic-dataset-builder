@@ -245,6 +245,13 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--strict-label-budgets",
+        action="store_true",
+        help=(
+            "Stop sequence assembly when per-label budgets are exhausted instead of filling with remaining labels."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
@@ -471,6 +478,7 @@ def build_sequence(
     min_nothing_after_event_frames: int = 0,
     consume_labels: Optional[set[str]] = None,
     target_frames_by_label: Optional[Dict[str, int]] = None,
+    strict_label_budgets: bool = False,
 ) -> tuple[np.ndarray, List[dict], dict]:
     label_pools: Dict[str, List[int]] = {}
     for idx, row in df.iterrows():
@@ -494,6 +502,8 @@ def build_sequence(
     max_event_run_frames = 0
     max_event_run_fragments = 0
     num_event_runs = 0
+
+    truncated_by_budget = False
 
     while current_frames < target_frames and attempts < max_attempts:
         if max_fragments is not None and len(segments) >= max_fragments:
@@ -523,6 +533,13 @@ def build_sequence(
                 if remaining > 0 and label_pools.get(lab)
             ]
             if not available_labels:
+                if strict_label_budgets:
+                    logger.info(
+                        "Stopping sequence because label budgets are exhausted or unavailable for %s.",
+                        sorted(target_frames_by_label.keys()),
+                    )
+                    truncated_by_budget = True
+                    break
                 # Allow filling with any available label when budgets are exhausted or pools are empty.
                 available_labels = [lab for lab, pool in label_pools.items() if pool]
                 if available_labels:
@@ -694,6 +711,7 @@ def build_sequence(
         "skipped_too_long": skipped_too_long,
         "fragment_limit_reached": fragment_limit_reached,
         "truncated_segments": truncated_segments,
+        "sequence_truncated_by_budget": truncated_by_budget,
         "pack_all_mode": False,
         "composition": composition_stats,
     }
@@ -1217,6 +1235,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             max_consecutive_event_frames=args.max_consecutive_event_frames,
             min_nothing_after_event_frames=args.min_nothing_after_event_frames,
             consume_labels=None,
+            strict_label_budgets=args.strict_label_budgets,
         )
 
         logger.info("Validation timeline (label, start_frame -> end_frame, truncated):")
@@ -1267,7 +1286,21 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                 if budget <= 0:
                     seq_counts.append(0)
                 else:
-                    seq_counts.append(int(np.ceil(budget / sequence_target_frames)))
+                    planned = int(np.ceil(budget / sequence_target_frames))
+                    event_frames = int(budget // 2) if budget > 0 else 0
+                    min_event_frames_per_sequence = max(int(sequence_target_frames // 2), 1)
+                    max_sequences = int(event_frames // min_event_frames_per_sequence)
+                    if max_sequences <= 0:
+                        seq_counts.append(0)
+                        continue
+                    if max_sequences < planned:
+                        logger.info(
+                            "Capping sequences for split %s from %d to %d due to event frame availability.",
+                            split,
+                            planned,
+                            max_sequences,
+                        )
+                    seq_counts.append(min(planned, max_sequences))
             logger.info(
                 "Auto sequence counts by split (sequence_frames=%d): %s",
                 sequence_target_frames,
@@ -1317,6 +1350,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                     min_nothing_after_event_frames=args.min_nothing_after_event_frames,
                     consume_labels=consume_labels,
                     target_frames_by_label=target_frames_by_label,
+                    strict_label_budgets=args.strict_label_budgets,
                 )
                 if remaining_split_by_label:
                     composition = meta.get("composition", {})
@@ -1356,6 +1390,11 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                 summary_record.update(meta.get("composition", {}))
                 summary_records.append(summary_record)
                 segment_records.extend(seq_segments)
+                if args.strict_label_budgets and meta.get("sequence_truncated_by_budget"):
+                    raise ValueError(
+                        "Label budgets exhausted before reaching 50/50 balance. "
+                        "Reduce the number of sequences or generate more event fragments."
+                    )
                 seq_idx += 1
     else:
         for seq_idx in range(args.num_sequences):
@@ -1374,6 +1413,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                 max_consecutive_event_frames=args.max_consecutive_event_frames,
                 min_nothing_after_event_frames=args.min_nothing_after_event_frames,
                 consume_labels=consume_labels,
+                strict_label_budgets=args.strict_label_budgets,
             )
 
             split = rng.choice(split_labels, p=split_probs)
@@ -1405,6 +1445,11 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             summary_record.update(meta.get("composition", {}))
             summary_records.append(summary_record)
             segment_records.extend(seq_segments)
+            if args.strict_label_budgets and meta.get("sequence_truncated_by_budget"):
+                raise ValueError(
+                    "Label budgets exhausted before reaching 50/50 balance. "
+                    "Reduce the number of sequences or generate more event fragments."
+                )
 
     summary_df = pd.DataFrame(summary_records)
     segments_df = pd.DataFrame(segment_records)
