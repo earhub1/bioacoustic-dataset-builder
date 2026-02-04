@@ -1325,7 +1325,12 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
 
     if split_by_pool:
         sequence_target_frames = target_frames
-        if args.variable_sequence_duration:
+        if args.one_sequence_per_split:
+            sequence_target_frames = target_frames
+            if not target_frames_by_split:
+                raise ValueError("--one-sequence-per-split requires per-split frame budgets.")
+            seq_counts = [1 if split_probs[idx] > 0 else 0 for idx, split in enumerate(split_labels)]
+        elif args.variable_sequence_duration:
             if not target_frames_by_split:
                 raise ValueError("--variable-sequence-duration requires per-split frame budgets.")
             min_sequence_frames = frames_for_duration(
@@ -1337,11 +1342,6 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             if min_sequence_frames <= 0:
                 raise ValueError("--min-sequence-duration must be positive.")
             seq_counts = [0 for _ in split_labels]
-        elif args.one_sequence_per_split:
-            sequence_target_frames = target_frames
-            if not target_frames_by_split:
-                raise ValueError("--one-sequence-per-split requires per-split frame budgets.")
-            seq_counts = [1 if split_probs[idx] > 0 else 0 for idx, split in enumerate(split_labels)]
         else:
             if args.auto_sequences_by_split:
                 sequence_target_frames = frames_for_duration(
@@ -1421,7 +1421,17 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                     continue
             split_seq_idx = 0
             while True:
-                if args.variable_sequence_duration:
+                if args.one_sequence_per_split:
+                    if split_seq_idx >= 1:
+                        break
+                    if not remaining_split_by_label:
+                        break
+                    target_frames_by_label = {
+                        label: int(remaining)
+                        for label, remaining in remaining_split_by_label.items()
+                    }
+                    sequence_target_frames = int(sum(remaining_split_by_label.values()))
+                elif args.variable_sequence_duration:
                     if not remaining_split_by_label:
                         break
                     total_remaining = int(sum(remaining_split_by_label.values()))
@@ -1432,16 +1442,6 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                         for label, remaining in remaining_split_by_label.items()
                     }
                     sequence_target_frames = total_remaining
-                elif args.one_sequence_per_split:
-                    if split_seq_idx >= 1:
-                        break
-                    if not remaining_split_by_label:
-                        break
-                    target_frames_by_label = {
-                        label: int(remaining)
-                        for label, remaining in remaining_split_by_label.items()
-                    }
-                    sequence_target_frames = int(sum(remaining_split_by_label.values()))
                 else:
                     if split_seq_idx >= split_count:
                         break
