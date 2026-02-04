@@ -117,6 +117,13 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--use-all-event-fragments",
+        action="store_true",
+        help=(
+            "Consume all non-Nothing fragments without replacement while sampling Nothing fragments as needed."
+        ),
+    )
+    parser.add_argument(
         "--max-sequence-duration",
         type=float,
         default=None,
@@ -227,6 +234,14 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Generate a single sequence for inspection without saving files, logging the timeline and run metrics."
+        ),
+    )
+    parser.add_argument(
+        "--auto-sequences-by-split",
+        action="store_true",
+        help=(
+            "Automatically compute the number of sequences per split from the per-split frame budgets and "
+            "--sequence-duration (requires --split-by-fragment or --split-by-event-fragments)."
         ),
     )
     parser.add_argument(
@@ -373,12 +388,20 @@ def pick_label(label_pools: Dict[str, List[int]], rng: np.random.Generator, noth
 
 
 def select_row_for_label(
-    df: pd.DataFrame, label_pools: Dict[str, List[int]], label: str, rng: np.random.Generator
+    df: pd.DataFrame,
+    label_pools: Dict[str, List[int]],
+    label: str,
+    rng: np.random.Generator,
+    *,
+    consume: bool = False,
 ) -> Optional[pd.Series]:
     pool_indices = label_pools.get(label, [])
     if not pool_indices:
         return None
-    row_idx = pool_indices[rng.integers(0, len(pool_indices))]
+    if consume:
+        row_idx = pool_indices.pop(rng.integers(0, len(pool_indices)))
+    else:
+        row_idx = pool_indices[rng.integers(0, len(pool_indices))]
     return df.loc[row_idx]
 
 
@@ -446,6 +469,7 @@ def build_sequence(
     max_consecutive_event_fragments: Optional[int] = None,
     max_consecutive_event_frames: Optional[int] = None,
     min_nothing_after_event_frames: int = 0,
+    consume_labels: Optional[set[str]] = None,
 ) -> tuple[np.ndarray, List[dict], dict]:
     label_pools: Dict[str, List[int]] = {}
     for idx, row in df.iterrows():
@@ -492,7 +516,8 @@ def build_sequence(
         if label is None:
             break
 
-        row = select_row_for_label(df, label_pools, label, rng)
+        consume = consume_labels is not None and label in consume_labels
+        row = select_row_for_label(df, label_pools, label, rng, consume=consume)
         if row is None:
             continue
 
@@ -512,13 +537,15 @@ def build_sequence(
             )
             if exceeds_frames or exceeds_frags or gap_frames_remaining > 0:
                 label = "Nothing"
-                row = select_row_for_label(df, label_pools, label, rng)
+                consume = consume_labels is not None and label in consume_labels
+                row = select_row_for_label(df, label_pools, label, rng, consume=consume)
                 if row is None:
                     # Fall back to the original event if Nothing pool is empty
                     label = pick_label(label_pools, rng, nothing_ratio)
                     if label is None:
                         break
-                    row = select_row_for_label(df, label_pools, label, rng)
+                    consume = consume_labels is not None and label in consume_labels
+                    row = select_row_for_label(df, label_pools, label, rng, consume=consume)
                     if row is None:
                         continue
 
@@ -933,6 +960,9 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     if args.pack_all_fragments and args.split_by_event_fragments:
         raise ValueError("--split-by-event-fragments is not supported together with --pack-all-fragments.")
 
+    if args.auto_sequences_by_split and not (args.split_by_fragment or args.split_by_event_fragments):
+        raise ValueError("--auto-sequences-by-split requires --split-by-fragment or --split-by-event-fragments.")
+
     split_target_values = {
         "train": args.target_event_fragments_train,
         "val": args.target_event_fragments_val,
@@ -1115,11 +1145,19 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             df = df[df["split"] == split_labels[0]]
             if df.empty:
                 raise ValueError(f"No fragments available for split '{split_labels[0]}' to validate.")
-            if target_frames_by_split:
-                target_frames = target_frames_by_split[split_labels[0]]
+        sequence_target_frames = target_frames
+        if args.auto_sequences_by_split:
+            sequence_target_frames = frames_for_duration(
+                duration_s=args.sequence_duration,
+                sr=args.target_sr,
+                frame_length=args.frame_length,
+                hop_length=args.hop_length,
+            )
+            if sequence_target_frames <= 0:
+                raise ValueError("sequence-duration must be positive.")
         features, segments, meta = build_sequence(
             df=df,
-            target_frames=target_frames,
+            target_frames=sequence_target_frames,
             sr=args.target_sr,
             frame_length=args.frame_length,
             hop_length=args.hop_length,
@@ -1131,6 +1169,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             max_consecutive_event_fragments=args.max_consecutive_event_fragments,
             max_consecutive_event_frames=args.max_consecutive_event_frames,
             min_nothing_after_event_frames=args.min_nothing_after_event_frames,
+            consume_labels=None,
         )
 
         logger.info("Validation timeline (label, start_frame -> end_frame, truncated):")
@@ -1148,9 +1187,48 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
         logger.info("Generated validation sequence with shape %s", features.shape)
         return pd.DataFrame([composition])
 
+    consume_labels = None
+    if args.use_all_event_fragments:
+        consume_labels = {label for label in df["label"].unique() if label != "Nothing"}
+        if not consume_labels:
+            raise ValueError("--use-all-event-fragments requires at least one non-Nothing label.")
+        if split_by_pool and not args.auto_sequences_by_split:
+            logger.warning(
+                "--use-all-event-fragments is enabled without --auto-sequences-by-split; "
+                "ensure --num-sequences and --sequence-duration are large enough to consume all events."
+            )
+
     if split_by_pool:
-        seq_counts = [int(args.num_sequences * p) for p in split_probs]
-        seq_counts[-1] += args.num_sequences - sum(seq_counts)
+        sequence_target_frames = target_frames
+        if args.auto_sequences_by_split:
+            sequence_target_frames = frames_for_duration(
+                duration_s=args.sequence_duration,
+                sr=args.target_sr,
+                frame_length=args.frame_length,
+                hop_length=args.hop_length,
+            )
+            if sequence_target_frames <= 0:
+                raise ValueError("sequence-duration must be positive.")
+            if not target_frames_by_split:
+                raise ValueError("--auto-sequences-by-split requires per-split frame budgets.")
+            seq_counts = []
+            for split in split_labels:
+                if split_probs[split_labels.index(split)] <= 0:
+                    seq_counts.append(0)
+                    continue
+                budget = target_frames_by_split.get(split, 0)
+                if budget <= 0:
+                    seq_counts.append(0)
+                else:
+                    seq_counts.append(int(np.ceil(budget / sequence_target_frames)))
+            logger.info(
+                "Auto sequence counts by split (sequence_frames=%d): %s",
+                sequence_target_frames,
+                dict(zip(split_labels, seq_counts)),
+            )
+        else:
+            seq_counts = [int(args.num_sequences * p) for p in split_probs]
+            seq_counts[-1] += args.num_sequences - sum(seq_counts)
         seq_idx = 0
         for split, split_count in zip(split_labels, seq_counts):
             if split_count <= 0:
@@ -1160,10 +1238,9 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                 raise ValueError(f"No fragments available for split '{split}'.")
             split_dir = args.output_dir / split
             for _ in range(split_count):
-                split_target_frames = target_frames_by_split.get(split, target_frames)
                 features, segments, meta = build_sequence(
                     df=split_df,
-                    target_frames=split_target_frames,
+                    target_frames=sequence_target_frames,
                     sr=args.target_sr,
                     frame_length=args.frame_length,
                     hop_length=args.hop_length,
@@ -1175,6 +1252,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                     max_consecutive_event_fragments=args.max_consecutive_event_fragments,
                     max_consecutive_event_frames=args.max_consecutive_event_frames,
                     min_nothing_after_event_frames=args.min_nothing_after_event_frames,
+                    consume_labels=consume_labels,
                 )
 
                 summary_record, seq_segments = save_sequence(
@@ -1220,6 +1298,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                 max_consecutive_event_fragments=args.max_consecutive_event_fragments,
                 max_consecutive_event_frames=args.max_consecutive_event_frames,
                 min_nothing_after_event_frames=args.min_nothing_after_event_frames,
+                consume_labels=consume_labels,
             )
 
             split = rng.choice(split_labels, p=split_probs)
