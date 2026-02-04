@@ -470,12 +470,16 @@ def build_sequence(
     max_consecutive_event_frames: Optional[int] = None,
     min_nothing_after_event_frames: int = 0,
     consume_labels: Optional[set[str]] = None,
+    target_frames_by_label: Optional[Dict[str, int]] = None,
 ) -> tuple[np.ndarray, List[dict], dict]:
     label_pools: Dict[str, List[int]] = {}
     for idx, row in df.iterrows():
         label_pools.setdefault(row["label"], []).append(idx)
 
+    if target_frames_by_label:
+        target_frames = int(sum(target_frames_by_label.values()))
     current_frames = 0
+    frames_by_label: Dict[str, int] = {}
     segments: List[dict] = []
     feature_chunks: List[np.ndarray] = []
     max_attempts = max(target_frames * 5, 100)
@@ -508,7 +512,33 @@ def build_sequence(
             if current_run_frames >= max_consecutive_event_frames:
                 force_nothing = True
 
-        if force_nothing and has_nothing_pool:
+        if target_frames_by_label:
+            remaining_frames_by_label = {
+                lab: max(int(frames) - int(frames_by_label.get(lab, 0)), 0)
+                for lab, frames in target_frames_by_label.items()
+            }
+            available_labels = [
+                lab
+                for lab, remaining in remaining_frames_by_label.items()
+                if remaining > 0 and label_pools.get(lab)
+            ]
+            if not available_labels:
+                # Allow filling with any available label when budgets are exhausted or pools are empty.
+                available_labels = [lab for lab, pool in label_pools.items() if pool]
+                if available_labels:
+                    logger.warning(
+                        "Label budgets exhausted or unavailable; filling with remaining labels %s.",
+                        sorted(available_labels),
+                    )
+            if available_labels:
+                deficits = {
+                    lab: remaining_frames_by_label.get(lab, 0)
+                    for lab in available_labels
+                }
+                label = max(deficits, key=deficits.get)
+            else:
+                label = None
+        elif force_nothing and has_nothing_pool:
             label = "Nothing"
         else:
             label = pick_label(label_pools, rng, nothing_ratio)
@@ -562,6 +592,14 @@ def build_sequence(
             continue
 
         remaining_frames = target_frames - current_frames
+        if target_frames_by_label:
+            remaining_label_frames = max(
+                int(target_frames_by_label.get(label, 0)) - int(frames_by_label.get(label, 0)),
+                0,
+            )
+            if remaining_label_frames <= 0:
+                continue
+            remaining_frames = min(remaining_frames, remaining_label_frames)
         if remaining_frames <= 0:
             break
         allow_partial = allow_partial_fragments and label == "Nothing"
@@ -580,6 +618,7 @@ def build_sequence(
         end_frame = current_frames + n_frames
 
         feature_chunks.append(features)
+        frames_by_label[label] = frames_by_label.get(label, 0) + n_frames
         segments.append(
             {
                 "label": label,
@@ -609,6 +648,14 @@ def build_sequence(
             current_run_fragments = 0
 
         current_frames = end_frame
+
+        if target_frames_by_label:
+            remaining_frames_by_label = {
+                lab: max(int(frames) - int(frames_by_label.get(lab, 0)), 0)
+                for lab, frames in target_frames_by_label.items()
+            }
+            if all(remaining <= 0 for remaining in remaining_frames_by_label.values()):
+                break
 
     if not feature_chunks:
         raise RuntimeError("Unable to assemble sequence: no valid fragments were sampled.")
@@ -1237,7 +1284,23 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             if split_df.empty:
                 raise ValueError(f"No fragments available for split '{split}'.")
             split_dir = args.output_dir / split
-            for _ in range(split_count):
+            remaining_split_by_label: Optional[Dict[str, int]] = None
+            if target_frames_by_split and event_label is not None:
+                split_target_frames = target_frames_by_split.get(split, 0)
+                if split_target_frames > 0:
+                    event_budget = int(split_target_frames // 2)
+                    remaining_split_by_label = {
+                        "Nothing": int(split_target_frames - event_budget),
+                        event_label: event_budget,
+                    }
+            for split_seq_idx in range(split_count):
+                target_frames_by_label = None
+                if remaining_split_by_label:
+                    remaining_sequences = max(split_count - split_seq_idx, 1)
+                    target_frames_by_label = {
+                        label: int(np.ceil(remaining / remaining_sequences))
+                        for label, remaining in remaining_split_by_label.items()
+                    }
                 features, segments, meta = build_sequence(
                     df=split_df,
                     target_frames=sequence_target_frames,
@@ -1253,7 +1316,19 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                     max_consecutive_event_frames=args.max_consecutive_event_frames,
                     min_nothing_after_event_frames=args.min_nothing_after_event_frames,
                     consume_labels=consume_labels,
+                    target_frames_by_label=target_frames_by_label,
                 )
+                if remaining_split_by_label:
+                    composition = meta.get("composition", {})
+                    frames_by_label = composition.get("frames_by_label")
+                    if isinstance(frames_by_label, str):
+                        frames_by_label = json.loads(frames_by_label)
+                    if isinstance(frames_by_label, dict):
+                        for label, used in frames_by_label.items():
+                            if label in remaining_split_by_label:
+                                remaining_split_by_label[label] = max(
+                                    remaining_split_by_label[label] - int(used), 0
+                                )
 
                 summary_record, seq_segments = save_sequence(
                     output_dir=split_dir,
