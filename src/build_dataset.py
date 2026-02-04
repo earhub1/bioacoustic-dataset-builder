@@ -1,18 +1,35 @@
-"""CLI to assemble synthetic sequences from extracted fragment features.
-
-This tool reads one or more fragment manifests produced by
-``extract_fragments.py`` and concatenates the stored log-mel spectrogram (dB)
-matrices into longer sequences. It supports class inclusion/exclusion (e.g.,
-ignorar "NI"), balancing the share of "Nothing" against eventos anotados, and
-reproducible sampling.
+# build_dataset_balanced.py
+# -*- coding: utf-8 -*-
 """
+Build 1 balanced (50/50 by frames) sequence per split from fragment manifests.
+
+Usage example (similar to your previous command):
+python src/build_dataset_balanced.py \
+  --fragments-dir data/results/fragments_combined/fragments_32khz \
+  --event-label G01 \
+  --output-dir data/results/sequences_low_freq \
+  --seed 42 \
+  --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1
+
+Assumptions:
+- Each fragments-dir contains a manifest.csv with columns:
+  - label
+  - n_frames
+  - snippet_path
+- Each row's snippet_path points to a .npy file with shape (n_mels, frames) or (frames, n_mels)
+
+What it guarantees:
+- For each split (train/val/test): 1 sequence with frames(G01) == frames(Nothing) (50/50)
+- All event fragments in that split are used (no dropping of G01)
+- Excess Nothing is ignored (removed by not being selected)
+"""
+
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -20,284 +37,65 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 DEFAULT_FRAGMENTS_DIR = Path("data/results/fragments")
-DEFAULT_OUTPUT_DIR = Path("data/results/sequences")
-FEATURE_TYPE = "logmel_db"
-FEATURE_DB_REF = 1.0
-FEATURE_TOP_DB = 80
+DEFAULT_OUTPUT_DIR = Path("data/results/sequences_balanced")
 
 
 def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Concatenate fragment features into synthetic sequences."
+    p = argparse.ArgumentParser(
+        description="Build 1 balanced sequence per split (50/50 by frames) from fragments manifests."
     )
-    parser.add_argument(
+    p.add_argument(
         "--fragments-dir",
         action="append",
         type=Path,
         default=None,
-        help=(
-            "Directory containing fragment subfolders and manifest.csv. Can be passed multiple times; "
-            "defaults to data/results/fragments."
-        ),
+        help="Directory containing manifest.csv. Can be passed multiple times.",
     )
-    parser.add_argument(
-        "--include-labels",
-        nargs="+",
-        default=None,
-        help="Optional list of labels to include. If omitted, all labels are considered.",
-    )
-    parser.add_argument(
-        "--exclude-labels",
-        nargs="+",
-        default=["NI"],
-        help="Labels to exclude (default: NI).",
-    )
-    parser.add_argument(
-        "--sequence-duration",
-        type=float,
-        default=5.0,
-        help="Target duration in seconds for each synthetic sequence.",
-    )
-    parser.add_argument(
-        "--split-by-fragment",
-        action="store_true",
-        help=(
-            "Split fragment pools into train/val/test without replacement before building sequences. "
-            "When enabled, sequences are sampled only from the assigned split and manifest_split.csv is saved."
-        ),
-    )
-    parser.add_argument(
-        "--split-by-event-fragments",
-        action="store_true",
-        help=(
-            "Split event fragments (plus other labels) into train/val/test without replacement, "
-            "compute per-split frame budgets from the event_label, and sample only within each split."
-        ),
-    )
-    parser.add_argument(
-        "--target-event-fragments",
-        type=int,
-        default=None,
-        help=(
-            "When set, compute the sequence frame budget from the total frames of the first N event fragments "
-            "and aim for a 50/50 Nothing:event balance (target_frames = 2 * frames_event). Requires --event-label "
-            "when multiple event labels exist."
-        ),
-    )
-    parser.add_argument(
-        "--target-event-fragments-train",
-        type=int,
-        default=None,
-        help="Number of event fragments to budget for the train split (requires --split-by-fragment).",
-    )
-    parser.add_argument(
-        "--target-event-fragments-val",
-        type=int,
-        default=None,
-        help="Number of event fragments to budget for the validation split (requires --split-by-fragment).",
-    )
-    parser.add_argument(
-        "--target-event-fragments-test",
-        type=int,
-        default=None,
-        help="Number of event fragments to budget for the test split (requires --split-by-fragment).",
-    )
-    parser.add_argument(
+    p.add_argument(
         "--event-label",
         type=str,
-        default=None,
-        help="Event label to use with --target-event-fragments (e.g., G01).",
+        default="G01",
+        help="Event label to balance against Nothing (default: G01).",
     )
-    parser.add_argument(
-        "--pack-all-fragments",
-        action="store_true",
-        help=(
-            "Disable sampling with replacement and consume every fragment exactly once, "
-            "allocating them to splits by frame budget."
-        ),
-    )
-    parser.add_argument(
-        "--use-all-event-fragments",
-        action="store_true",
-        help=(
-            "Consume all non-Nothing fragments without replacement while sampling Nothing fragments as needed."
-        ),
-    )
-    parser.add_argument(
-        "--max-sequence-duration",
-        type=float,
-        default=None,
-        help=(
-            "Optional maximum duration (s) for each sequence when --pack-all-fragments is enabled. "
-            "If omitted, a single sequence is produced por split using all assigned frames."
-        ),
-    )
-    parser.add_argument(
-        "--max-fragments-per-sequence",
-        type=int,
-        default=None,
-        help=(
-            "Optional cap on how many fragments can be concatenated per sequence. "
-            "If set, sampling stops when this limit is reached even if the duration target was not met."
-        ),
-    )
-    parser.add_argument(
-        "--max-consecutive-event-fragments",
-        type=int,
-        default=3,
-        help=(
-            "Maximum number of consecutive event fragments before forcing insertion of Nothing (when available)."
-        ),
-    )
-    parser.add_argument(
-        "--max-consecutive-event-frames",
-        type=int,
-        default=None,
-        help=(
-            "Optional cap on consecutive event frames before forcing insertion of Nothing (when available)."
-        ),
-    )
-    parser.add_argument(
-        "--min-nothing-after-event-frames",
-        type=int,
-        default=20,
-        help=(
-            "Minimum frames of Nothing required after an event before allowing another event fragment."
-        ),
-    )
-    parser.add_argument(
-        "--num-sequences",
-        type=int,
-        default=10,
-        help="Number of sequences to generate.",
-    )
-    parser.add_argument(
-        "--train-ratio",
-        type=float,
-        default=0.7,
-        help="Proportion of sequences to route to the train split.",
-    )
-    parser.add_argument(
-        "--val-ratio",
-        type=float,
-        default=0.15,
-        help="Proportion of sequences to route to the validation split.",
-    )
-    parser.add_argument(
-        "--test-ratio",
-        type=float,
-        default=0.15,
-        help="Proportion of sequences to route to the test split.",
-    )
-    parser.add_argument(
-        "--nothing-ratio",
-        type=float,
-        default=1.0,
-        help=(
-            "Ratio of selecting 'Nothing' fragments relative to other labels (e.g., 1.0 keeps a 1:1 balance when both pools exist)."
-        ),
-    )
-    parser.add_argument(
-        "--target-sr",
-        type=int,
-        default=64000,
-        help="Sampling rate used to interpret frame/hop durations (match the extractor).",
-    )
-    parser.add_argument(
-        "--expected-n-mels",
-        type=int,
-        default=64,
-        help="Expected number of mel frequency bins (log-mel dB fragments).",
-    )
-    parser.add_argument(
-        "--allow-partial-fragments",
-        action="store_true",
-        help=(
-            "Permit including fragments longer than the remaining budget; the tail will be trimmed to the sequence limit. "
-            "By default, fragments longer than the remaining frames are skipped and resampled."
-        ),
-    )
-    parser.add_argument(
-        "--frame-length",
-        type=int,
-        default=6400,
-        help="Frame length in samples (match the extractor).",
-    )
-    parser.add_argument(
-        "--hop-length",
-        type=int,
-        default=6400,
-        help="Hop length in samples (match the extractor).",
-    )
-    parser.add_argument(
-        "--validate-composition",
-        action="store_true",
-        help=(
-            "Generate a single sequence for inspection without saving files, logging the timeline and run metrics."
-        ),
-    )
-    parser.add_argument(
-        "--auto-sequences-by-split",
-        action="store_true",
-        help=(
-            "Automatically compute the number of sequences per split from the per-split frame budgets and "
-            "--sequence-duration (requires --split-by-fragment or --split-by-event-fragments)."
-        ),
-    )
-    parser.add_argument(
-        "--strict-label-budgets",
-        action="store_true",
-        help=(
-            "Stop sequence assembly when per-label budgets are exhausted instead of filling with remaining labels."
-        ),
-    )
-    parser.add_argument(
-        "--variable-sequence-duration",
-        action="store_true",
-        help=(
-            "Allow sequences to use the remaining per-split budget instead of a fixed --sequence-duration."
-        ),
-    )
-    parser.add_argument(
-        "--min-sequence-duration",
-        type=float,
-        default=1.0,
-        help=(
-            "Minimum duration (seconds) for variable-length sequences when --variable-sequence-duration is set."
-        ),
-    )
-    parser.add_argument(
-        "--dry-run-budgets",
-        action="store_true",
-        help="Compute per-split budget feasibility and exit before building sequences.",
-    )
-    parser.add_argument(
-        "--one-sequence-per-split",
-        action="store_true",
-        help="Generate a single sequence per split using the remaining per-split budgets.",
-    )
-    parser.add_argument(
+    p.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
-        help="Directory to write the assembled sequences and manifest_sequences.csv.",
+        help="Output directory for sequences and manifests.",
     )
-    parser.add_argument(
-        "--seed",
+    p.add_argument("--seed", type=int, default=42, help="Random seed.")
+    p.add_argument("--train-ratio", type=float, default=0.7, help="Train ratio (default 0.7).")
+    p.add_argument("--val-ratio", type=float, default=0.2, help="Val ratio (default 0.2).")
+    p.add_argument("--test-ratio", type=float, default=0.1, help="Test ratio (default 0.1).")
+    p.add_argument(
+        "--expected-n-mels",
         type=int,
-        default=42,
-        help="Random seed for reproducible sampling.",
+        default=64,
+        help="Expected number of mel bins in stored fragments (default 64).",
     )
-    return parser.parse_args(args=args)
+    p.add_argument(
+        "--target-sr",
+        type=int,
+        default=64000,
+        help="Sampling rate used when interpreting frames into seconds (default 64000).",
+    )
+    p.add_argument(
+        "--frame-length",
+        type=int,
+        default=6400,
+        help="Frame length in samples (default 6400).",
+    )
+    p.add_argument(
+        "--hop-length",
+        type=int,
+        default=6400,
+        help="Hop length in samples (default 6400).",
+    )
+    return p.parse_args(args=args)
 
 
-def frames_for_duration(duration_s: float, sr: int, frame_length: int, hop_length: int) -> int:
-    total_samples = max(duration_s * sr, 0)
-    if total_samples <= 0:
-        return 0
-    if total_samples <= frame_length:
-        return 1
-    return int(np.ceil((total_samples - frame_length) / hop_length + 1))
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
 
 
 def frames_to_seconds(n_frames: int, sr: int, frame_length: int, hop_length: int) -> float:
@@ -306,1301 +104,354 @@ def frames_to_seconds(n_frames: int, sr: int, frame_length: int, hop_length: int
     return ((n_frames - 1) * hop_length + frame_length) / float(sr)
 
 
-def ensure_output_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-
-
 def resolve_snippet_path(snippet: str, manifest_dir: Path) -> Path:
-    normalized_snippet = snippet.replace("\\", "/")
-    path = Path(normalized_snippet)
-    # Accept absolute paths or explicit drive references (Windows), returning as-is.
+    normalized = snippet.replace("\\", "/")
+    path = Path(normalized)
+
     if path.is_absolute() or ":" in snippet:
         return path
 
-    # If the provided relative path already exists from the current working
-    # directory (e.g., when manifest entries include the fragments directory
-    # prefix), honor it directly to avoid duplicating the fragments dir.
+    # If it already exists as given, keep it
     if path.exists():
         return path
-    if path.as_posix().startswith(manifest_dir.as_posix()):
-        return path
 
-    # Fallback: treat the snippet path as relative to the manifest directory.
+    # Otherwise treat as relative to manifest_dir
     return manifest_dir / path
 
 
 def normalize_feature_shape(features: np.ndarray, expected_n_mels: int, snippet_path: Path) -> np.ndarray:
     if features.ndim != 2:
-        raise ValueError(
-            f"Fragment {snippet_path} has shape {features.shape}; expected 2D log-mel dB (n_mels x frames)."
-        )
-
+        raise ValueError(f"Fragment {snippet_path} has shape {features.shape}; expected 2D matrix.")
     if features.shape[0] == expected_n_mels:
         return features
-
     if features.shape[1] == expected_n_mels:
-        logger.warning(
-            "Transposing fragment %s from shape %s to (n_mels x frames) using expected_n_mels=%d",
-            snippet_path,
-            features.shape,
-            expected_n_mels,
-        )
+        logger.warning("Transposing %s from %s to (n_mels x frames)", snippet_path, features.shape)
         return features.T
-
     raise ValueError(
-        f"Fragment {snippet_path} has incompatible shape {features.shape}; expected n_mels={expected_n_mels} on the first dimension."
+        f"Fragment {snippet_path} has incompatible shape {features.shape}; "
+        f"expected n_mels={expected_n_mels} on one dimension."
     )
 
 
-def load_manifests(
-    fragment_dirs: List[Path], include_labels: Optional[List[str]], exclude_labels: List[str]
-) -> pd.DataFrame:
+def load_manifests(fragment_dirs: List[Path]) -> pd.DataFrame:
     frames: List[pd.DataFrame] = []
     for frag_dir in fragment_dirs:
         manifest_path = frag_dir / "manifest.csv"
         if not manifest_path.exists():
-            logger.warning("Skipping %s because manifest.csv is missing", frag_dir)
+            logger.warning("Skipping %s (missing manifest.csv)", frag_dir)
             continue
         df = pd.read_csv(manifest_path)
-        df["_manifest_dir"] = manifest_path.parent
+        df["_manifest_dir"] = str(manifest_path.parent)
         frames.append(df)
 
     if not frames:
-        raise FileNotFoundError("No manifest.csv files found in provided fragments directories.")
+        raise FileNotFoundError("No manifest.csv files found in provided --fragments-dir paths.")
 
     data = pd.concat(frames, ignore_index=True)
+    if "label" not in data.columns or "n_frames" not in data.columns or "snippet_path" not in data.columns:
+        raise ValueError("manifest.csv must contain columns: label, n_frames, snippet_path")
+
     data["n_frames"] = pd.to_numeric(data["n_frames"], errors="coerce")
     if data["n_frames"].isna().any():
-        raise ValueError("All fragments must provide n_frames to support packing by frame budget.")
-    if include_labels is not None:
-        data = data[data["label"].isin(include_labels)]
-    if exclude_labels:
-        data = data[~data["label"].isin(exclude_labels)]
-
-    if data.empty:
-        raise ValueError("No fragments available after applying include/exclude label filters.")
+        raise ValueError("All rows must have a valid numeric n_frames.")
     return data
 
 
-def normalize_split_probs(train: float, val: float, test: float) -> tuple[list[str], np.ndarray]:
+def validate_split_ratios(train: float, val: float, test: float) -> Tuple[List[str], np.ndarray]:
     if min(train, val, test) < 0:
         raise ValueError("Split ratios must be non-negative.")
-    split_total = train + val + test
-    if not np.isclose(split_total, 1.0):
+    s = train + val + test
+    if not np.isclose(s, 1.0):
         raise ValueError("train-ratio + val-ratio + test-ratio must sum to 1.0.")
-    split_labels = ["train", "val", "test"]
-    split_probs = np.array([train, val, test], dtype=float)
-    if split_probs.sum() <= 0:
-        raise ValueError("At least one split ratio must be greater than zero.")
-    split_probs = split_probs / split_probs.sum()
-    return split_labels, split_probs
+    labels = ["train", "val", "test"]
+    probs = np.array([train, val, test], dtype=float)
+    probs = probs / probs.sum()
+    return labels, probs
 
 
-def pick_label(label_pools: Dict[str, List[int]], rng: np.random.Generator, nothing_ratio: float) -> Optional[str]:
-    has_nothing = bool(label_pools.get("Nothing"))
-    non_nothing_labels = [lab for lab in label_pools.keys() if lab != "Nothing" and label_pools[lab]]
+def stratified_split(df: pd.DataFrame, split_labels: List[str], split_probs: np.ndarray, seed: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    out = df.copy()
+    out["split"] = None
 
-    if not has_nothing and not non_nothing_labels:
-        return None
+    for label, g in out.groupby("label"):
+        idx = g.index.to_numpy()
+        rng.shuffle(idx)
+        n = len(idx)
+        counts = [int(n * p) for p in split_probs]
+        counts[-1] += n - sum(counts)
 
-    if not has_nothing:
-        return rng.choice(non_nothing_labels)
-    if not non_nothing_labels:
-        return "Nothing"
+        cursor = 0
+        for split, c in zip(split_labels, counts):
+            sel = idx[cursor : cursor + c]
+            out.loc[sel, "split"] = split
+            cursor += c
 
-    nothing_weight = max(nothing_ratio, 0.0)
-    event_weight = 1.0
-    total = nothing_weight + event_weight
-    if total <= 0:
-        return rng.choice(non_nothing_labels)
-
-    if rng.random() < (nothing_weight / total):
-        return "Nothing"
-    return rng.choice(non_nothing_labels)
-
-
-def select_row_for_label(
-    df: pd.DataFrame,
-    label_pools: Dict[str, List[int]],
-    label: str,
-    rng: np.random.Generator,
-    *,
-    consume: bool = False,
-) -> Optional[pd.Series]:
-    pool_indices = label_pools.get(label, [])
-    if not pool_indices:
-        return None
-    if consume:
-        row_idx = pool_indices.pop(rng.integers(0, len(pool_indices)))
-    else:
-        row_idx = pool_indices[rng.integers(0, len(pool_indices))]
-    return df.loc[row_idx]
+    if out["split"].isna().any():
+        raise RuntimeError("Failed to assign splits to all rows.")
+    return out
 
 
-def compute_composition_stats(
-    segments: List[dict], total_frames: int, sr: int, frame_length: int, hop_length: int
-) -> dict:
-    frames_by_label: Dict[str, int] = {}
-    current_run_frames = 0
-    current_run_fragments = 0
-    max_event_run_frames = 0
-    max_event_run_fragments = 0
-    num_event_runs = 0
-    in_event_run = False
-
-    for seg in sorted(segments, key=lambda s: s.get("start_frame", 0)):
-        label = seg["label"]
-        duration_frames = int(seg["end_frame"] - seg["start_frame"])
-        frames_by_label[label] = frames_by_label.get(label, 0) + duration_frames
-        is_event = label != "Nothing"
-
-        if is_event:
-            if not in_event_run:
-                num_event_runs += 1
-                current_run_frames = 0
-                current_run_fragments = 0
-            in_event_run = True
-            current_run_frames += duration_frames
-            current_run_fragments += 1
-            max_event_run_frames = max(max_event_run_frames, current_run_frames)
-            max_event_run_fragments = max(max_event_run_fragments, current_run_fragments)
-        else:
-            in_event_run = False
-            current_run_frames = 0
-            current_run_fragments = 0
-
-    frames_nothing = frames_by_label.get("Nothing", 0)
-    frames_events = max(total_frames - frames_nothing, 0)
-    pct_nothing = frames_nothing / total_frames if total_frames > 0 else 0.0
-    pct_events = frames_events / total_frames if total_frames > 0 else 0.0
-
-    return {
-        "frames_by_label": json.dumps(frames_by_label, ensure_ascii=False),
-        "frames_nothing": frames_nothing,
-        "frames_events": frames_events,
-        "pct_nothing": pct_nothing,
-        "pct_events": pct_events,
-        "max_event_run_frames": max_event_run_frames,
-        "max_event_run_seconds": frames_to_seconds(max_event_run_frames, sr, frame_length, hop_length),
-        "max_event_run_fragments": max_event_run_fragments,
-        "num_event_runs": num_event_runs,
-    }
+def load_fragment(row: pd.Series, expected_n_mels: int) -> Tuple[np.ndarray, Path]:
+    manifest_dir = Path(str(row["_manifest_dir"]))
+    snippet_path = resolve_snippet_path(str(row["snippet_path"]), manifest_dir)
+    if not snippet_path.exists():
+        raise FileNotFoundError(f"Missing snippet: {snippet_path}")
+    feat = np.load(snippet_path)
+    feat = normalize_feature_shape(feat, expected_n_mels, snippet_path)
+    if feat.shape[1] <= 0:
+        raise ValueError(f"Non-positive frames in {snippet_path}")
+    return feat, snippet_path
 
 
-def build_sequence(
-    df: pd.DataFrame,
-    target_frames: int,
-    sr: int,
-    frame_length: int,
-    hop_length: int,
+def build_one_sequence_50_50(
+    df_split: pd.DataFrame,
+    event_label: str,
     expected_n_mels: int,
-    nothing_ratio: float,
-    rng: np.random.Generator,
-    max_fragments: Optional[int] = None,
-    allow_partial_fragments: bool = False,
-    max_consecutive_event_fragments: Optional[int] = None,
-    max_consecutive_event_frames: Optional[int] = None,
-    min_nothing_after_event_frames: int = 0,
-    consume_labels: Optional[set[str]] = None,
-    target_frames_by_label: Optional[Dict[str, int]] = None,
-    strict_label_budgets: bool = False,
-) -> tuple[np.ndarray, List[dict], dict]:
-    label_pools: Dict[str, List[int]] = {}
-    for idx, row in df.iterrows():
-        label_pools.setdefault(row["label"], []).append(idx)
+    seed: int,
+) -> Tuple[np.ndarray, List[dict], Dict[str, int]]:
+    """
+    Build a single sequence where:
+      - All event fragments in df_split are included (shuffled)
+      - Nothing fragments are added until frames(Nothing) == frames(event)
+      - Nothing can be reused with replacement if needed
+      - The last Nothing may be truncated to fit exactly
+    """
+    rng = np.random.default_rng(seed)
 
-    if target_frames_by_label:
-        target_frames = int(sum(target_frames_by_label.values()))
-    current_frames = 0
-    frames_by_label: Dict[str, int] = {}
+    events = df_split[df_split["label"] == event_label].copy()
+    nothings = df_split[df_split["label"] == "Nothing"].copy()
+
+    if events.empty:
+        raise ValueError(f"Split has no event fragments for '{event_label}'. Cannot build 50/50.")
+    if nothings.empty:
+        raise ValueError("Split has no Nothing fragments. Cannot build 50/50.")
+
+    # Shuffle order deterministically
+    events = events.sample(frac=1.0, random_state=seed)
+    nothings = nothings.sample(frac=1.0, random_state=seed)
+
+    chunks: List[np.ndarray] = []
     segments: List[dict] = []
-    feature_chunks: List[np.ndarray] = []
-    max_attempts = max(target_frames * 5, 100)
-    attempts = 0
-    skipped_too_long = 0
-    fragment_limit_reached = False
+    cur = 0
 
-    current_run_frames = 0
-    current_run_fragments = 0
-    gap_frames_remaining = 0
-    in_event_run = False
-    max_event_run_frames = 0
-    max_event_run_fragments = 0
-    num_event_runs = 0
-
-    truncated_by_budget = False
-
-    while current_frames < target_frames and attempts < max_attempts:
-        if max_fragments is not None and len(segments) >= max_fragments:
-            fragment_limit_reached = True
-            break
-
-        attempts += 1
-        has_nothing_pool = bool(label_pools.get("Nothing"))
-        force_nothing = False
-        if gap_frames_remaining > 0:
-            force_nothing = True
-        if max_consecutive_event_fragments is not None and max_consecutive_event_fragments >= 0:
-            if current_run_fragments >= max_consecutive_event_fragments:
-                force_nothing = True
-        if max_consecutive_event_frames is not None and max_consecutive_event_frames >= 0:
-            if current_run_frames >= max_consecutive_event_frames:
-                force_nothing = True
-
-        if target_frames_by_label:
-            remaining_frames_by_label = {
-                lab: max(int(frames) - int(frames_by_label.get(lab, 0)), 0)
-                for lab, frames in target_frames_by_label.items()
-            }
-            available_labels = [
-                lab
-                for lab, remaining in remaining_frames_by_label.items()
-                if remaining > 0 and label_pools.get(lab)
-            ]
-            if not available_labels:
-                if strict_label_budgets:
-                    logger.info(
-                        "Stopping sequence because label budgets are exhausted or unavailable for %s.",
-                        sorted(target_frames_by_label.keys()),
-                    )
-                    truncated_by_budget = True
-                    break
-                # Allow filling with any available label when budgets are exhausted or pools are empty.
-                available_labels = [lab for lab, pool in label_pools.items() if pool]
-                if available_labels:
-                    logger.warning(
-                        "Label budgets exhausted or unavailable; filling with remaining labels %s.",
-                        sorted(available_labels),
-                    )
-            if available_labels:
-                deficits = {
-                    lab: remaining_frames_by_label.get(lab, 0)
-                    for lab in available_labels
-                }
-                label = max(deficits, key=deficits.get)
-            else:
-                label = None
-        elif force_nothing and has_nothing_pool:
-            label = "Nothing"
-        else:
-            label = pick_label(label_pools, rng, nothing_ratio)
-
-        if label is None:
-            break
-
-        consume = consume_labels is not None and label in consume_labels
-        row = select_row_for_label(df, label_pools, label, rng, consume=consume)
-        if row is None:
+    # 1) Include all events (no truncation of events)
+    for _, row in events.iterrows():
+        try:
+            feat, path = load_fragment(row, expected_n_mels)
+        except Exception as e:
+            # If an event fragment is missing/corrupt, we skip with warning.
+            # (If you want strict failure, replace this with raise.)
+            logger.warning("Skipping event fragment due to error: %s", e)
             continue
-
-        # If event run constraints would be violated, switch to Nothing when possible.
-        if label != "Nothing" and has_nothing_pool:
-            prospective_frames = current_run_frames + int(row["n_frames"])
-            prospective_frags = current_run_fragments + 1
-            exceeds_frames = (
-                max_consecutive_event_frames is not None
-                and max_consecutive_event_frames >= 0
-                and prospective_frames > max_consecutive_event_frames
-            )
-            exceeds_frags = (
-                max_consecutive_event_fragments is not None
-                and max_consecutive_event_fragments >= 0
-                and prospective_frags > max_consecutive_event_fragments
-            )
-            if exceeds_frames or exceeds_frags or gap_frames_remaining > 0:
-                label = "Nothing"
-                consume = consume_labels is not None and label in consume_labels
-                row = select_row_for_label(df, label_pools, label, rng, consume=consume)
-                if row is None:
-                    # Fall back to the original event if Nothing pool is empty
-                    label = pick_label(label_pools, rng, nothing_ratio)
-                    if label is None:
-                        break
-                    consume = consume_labels is not None and label in consume_labels
-                    row = select_row_for_label(df, label_pools, label, rng, consume=consume)
-                    if row is None:
-                        continue
-
-        manifest_dir = Path(row["_manifest_dir"])
-        snippet_path = resolve_snippet_path(str(row["snippet_path"]), manifest_dir)
-        if not snippet_path.exists():
-            logger.warning("Skipping missing snippet %s", snippet_path)
-            continue
-
-        features = np.load(snippet_path)
-        features = normalize_feature_shape(features, expected_n_mels, snippet_path)
-        n_frames = features.shape[1]
-        if n_frames <= 0:
-            continue
-
-        remaining_frames = target_frames - current_frames
-        if target_frames_by_label:
-            remaining_label_frames = max(
-                int(target_frames_by_label.get(label, 0)) - int(frames_by_label.get(label, 0)),
-                0,
-            )
-            if remaining_label_frames <= 0:
-                continue
-            remaining_frames = min(remaining_frames, remaining_label_frames)
-        if remaining_frames <= 0:
-            break
-        allow_partial = allow_partial_fragments and label == "Nothing"
-        if n_frames > remaining_frames and not allow_partial:
-            skipped_too_long += 1
-            continue
-
-        truncated = False
-        original_end_frame = current_frames + n_frames
-        if n_frames > remaining_frames and allow_partial:
-            features = features[:, :remaining_frames]
-            n_frames = features.shape[1]
-            truncated = True
-
-        start_frame = current_frames
-        end_frame = current_frames + n_frames
-
-        feature_chunks.append(features)
-        frames_by_label[label] = frames_by_label.get(label, 0) + n_frames
+        n_frames = int(feat.shape[1])
+        chunks.append(feat)
         segments.append(
             {
-                "label": label,
-                "snippet_path": str(snippet_path),
-                "start_frame": int(start_frame),
-                "end_frame": int(end_frame),
-                "original_end_frame": int(original_end_frame),
+                "label": event_label,
+                "snippet_path": str(path),
+                "start_frame": cur,
+                "end_frame": cur + n_frames,
+                "truncated": False,
+            }
+        )
+        cur += n_frames
+
+    event_frames_used = cur
+    if event_frames_used <= 0:
+        raise RuntimeError("No valid event fragments could be loaded; sequence cannot be built.")
+
+    target_nothing_frames = event_frames_used
+
+    # 2) Add Nothing until it matches event frames
+    nothing_used = 0
+    nothing_rows = [r for _, r in nothings.iterrows()]
+    ptr = 0
+
+    while nothing_used < target_nothing_frames:
+        if ptr >= len(nothing_rows):
+            # Replacement: reshuffle and reuse Nothing
+            rng.shuffle(nothing_rows)
+            ptr = 0
+
+        row = nothing_rows[ptr]
+        ptr += 1
+
+        try:
+            feat, path = load_fragment(row, expected_n_mels)
+        except Exception as e:
+            logger.warning("Skipping nothing fragment due to error: %s", e)
+            continue
+
+        n_frames = int(feat.shape[1])
+        remaining = target_nothing_frames - nothing_used
+
+        truncated = False
+        if n_frames > remaining:
+            feat = feat[:, :remaining]
+            n_frames = int(feat.shape[1])
+            truncated = True
+
+        chunks.append(feat)
+        segments.append(
+            {
+                "label": "Nothing",
+                "snippet_path": str(path),
+                "start_frame": cur,
+                "end_frame": cur + n_frames,
                 "truncated": truncated,
             }
         )
+        cur += n_frames
+        nothing_used += n_frames
 
-        if label != "Nothing":
-            if not in_event_run:
-                num_event_runs += 1
-                current_run_frames = 0
-                current_run_fragments = 0
-                in_event_run = True
-            current_run_frames += n_frames
-            current_run_fragments += 1
-            max_event_run_frames = max(max_event_run_frames, current_run_frames)
-            max_event_run_fragments = max(max_event_run_fragments, current_run_fragments)
-            gap_frames_remaining = max(min_nothing_after_event_frames, 0)
-        else:
-            gap_frames_remaining = max(gap_frames_remaining - n_frames, 0)
-            in_event_run = False
-            current_run_frames = 0
-            current_run_fragments = 0
+    combined = np.concatenate(chunks, axis=1)
 
-        current_frames = end_frame
-
-        if target_frames_by_label:
-            remaining_frames_by_label = {
-                lab: max(int(frames) - int(frames_by_label.get(lab, 0)), 0)
-                for lab, frames in target_frames_by_label.items()
-            }
-            if all(remaining <= 0 for remaining in remaining_frames_by_label.values()):
-                break
-
-    if not feature_chunks:
-        raise RuntimeError("Unable to assemble sequence: no valid fragments were sampled.")
-
-    combined = np.concatenate(feature_chunks, axis=1)
-    truncated_segments = 0
-    if combined.shape[1] > target_frames:
-        combined = combined[:, :target_frames]
-
-    trimmed_segments: List[dict] = []
-    for seg in segments:
-        if seg["start_frame"] >= target_frames:
-            continue
-        end_frame = min(seg["end_frame"], target_frames)
-        start_frame = seg["start_frame"]
-        truncated_flag = bool(seg.get("truncated", False)) or end_frame < seg.get(
-            "original_end_frame", seg["end_frame"]
-        )
-        if truncated_flag and seg.get("label") == "Nothing":
-            truncated_segments += 1
-        trimmed_segments.append(
-            {
-                **seg,
-                "end_frame": int(end_frame),
-                "start_s": frames_to_seconds(start_frame, sr, frame_length, hop_length),
-                "end_s": frames_to_seconds(end_frame, sr, frame_length, hop_length),
-                "truncated": truncated_flag,
-            }
-        )
-
-    composition_stats = compute_composition_stats(
-        trimmed_segments, total_frames=combined.shape[1], sr=sr, frame_length=frame_length, hop_length=hop_length
-    )
-
-    return combined, trimmed_segments, {
-        "skipped_too_long": skipped_too_long,
-        "fragment_limit_reached": fragment_limit_reached,
-        "truncated_segments": truncated_segments,
-        "sequence_truncated_by_budget": truncated_by_budget,
-        "pack_all_mode": False,
-        "composition": composition_stats,
+    meta = {
+        "frames_event": int(event_frames_used),
+        "frames_nothing": int(nothing_used),
+        "total_frames": int(combined.shape[1]),
     }
+    return combined, segments, meta
 
 
-def save_sequence(
+def save_sequence_and_manifests(
     output_dir: Path,
-    sequence_idx: int,
+    split: str,
     features: np.ndarray,
     segments: List[dict],
+    meta: Dict[str, int],
     sr: int,
     frame_length: int,
     hop_length: int,
-    split: str,
-    pack_all_mode: bool,
-    seed: int,
     expected_n_mels: int,
-    feature_type: str,
-    db_ref: float,
-    top_db: float,
-) -> tuple[dict, List[dict]]:
-    ensure_output_dir(output_dir)
-    seq_path = output_dir / f"sequence_{sequence_idx}.npy"
+) -> Tuple[dict, List[dict]]:
+    split_dir = output_dir / split
+    ensure_dir(split_dir)
+
+    seq_path = split_dir / "sequence_0.npy"
     np.save(seq_path, features)
 
     total_frames = int(features.shape[1])
     total_duration_s = frames_to_seconds(total_frames, sr, frame_length, hop_length)
 
-    summary_record = {
+    summary = {
         "sequence_path": str(seq_path),
-        "sequence_idx": sequence_idx,
+        "sequence_idx": 0,
         "split": split,
         "total_frames": total_frames,
         "total_duration_s": total_duration_s,
-        "n_segments": len(segments),
-        "pack_all_mode": pack_all_mode,
-        "seed": seed,
-        "feature_type": feature_type,
         "mel_bins": expected_n_mels,
-        "db_ref": db_ref,
-        "top_db": top_db,
+        "frames_event": meta["frames_event"],
+        "frames_nothing": meta["frames_nothing"],
+        "pct_event": meta["frames_event"] / total_frames if total_frames else 0.0,
+        "pct_nothing": meta["frames_nothing"] / total_frames if total_frames else 0.0,
+        "n_segments": len(segments),
     }
 
-    segment_records: List[dict] = []
-    for seg_idx, seg in enumerate(segments):
-        duration_frames = int(seg["end_frame"] - seg["start_frame"])
-        segment_records.append(
+    seg_rows: List[dict] = []
+    for i, seg in enumerate(segments):
+        start = int(seg["start_frame"])
+        end = int(seg["end_frame"])
+        dur_frames = max(end - start, 0)
+        seg_rows.append(
             {
                 "sequence_path": str(seq_path),
-                "sequence_idx": sequence_idx,
+                "sequence_idx": 0,
                 "split": split,
-                "segment_idx": seg_idx,
+                "segment_idx": i,
                 "label": seg["label"],
                 "snippet_path": seg["snippet_path"],
-                "start_frame": int(seg["start_frame"]),
-                "end_frame": int(seg["end_frame"]),
-                "duration_frames": duration_frames,
-                "start_s": seg.get("start_s", frames_to_seconds(seg["start_frame"], sr, frame_length, hop_length)),
-                "end_s": seg.get("end_s", frames_to_seconds(seg["end_frame"], sr, frame_length, hop_length)),
-                "duration_s": frames_to_seconds(duration_frames, sr, frame_length, hop_length),
+                "start_frame": start,
+                "end_frame": end,
+                "duration_frames": dur_frames,
+                "start_s": frames_to_seconds(start, sr, frame_length, hop_length),
+                "end_s": frames_to_seconds(end, sr, frame_length, hop_length),
+                "duration_s": frames_to_seconds(dur_frames, sr, frame_length, hop_length),
                 "truncated": bool(seg.get("truncated", False)),
-                "feature_type": feature_type,
-                "mel_bins": expected_n_mels,
             }
         )
 
-    return summary_record, segment_records
+    # per-split manifests
+    pd.DataFrame([summary]).to_csv(split_dir / "manifest_sequences_summary.csv", index=False)
+    pd.DataFrame(seg_rows).to_csv(split_dir / "manifest_sequences.csv", index=False)
+
+    return summary, seg_rows
 
 
-def allocate_fragments_by_split(
-    df: pd.DataFrame, split_labels: list[str], split_probs: np.ndarray, rng: np.random.Generator
-) -> dict:
-    total_frames = int(df["n_frames"].sum())
-    if total_frames <= 0:
-        raise ValueError("No frames available to pack.")
+def main(cli_args: Optional[Sequence[str]] = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    args = parse_args(cli_args)
 
-    budgets = [int(total_frames * p) for p in split_probs]
-    # Ensure full coverage by assigning any residual to the last split
-    residual = total_frames - sum(budgets)
-    budgets[-1] += residual
+    fragment_dirs = args.fragments_dir or [DEFAULT_FRAGMENTS_DIR]
+    split_labels, split_probs = validate_split_ratios(args.train_ratio, args.val_ratio, args.test_ratio)
 
-    assignments: dict[str, list[pd.Series]] = {lbl: [] for lbl in split_labels}
-    remaining = budgets[0]
-    split_idx = 0
+    df = load_manifests(fragment_dirs)
 
-    for row_idx in rng.permutation(df.index):
-        row = df.loc[row_idx]
-        while split_idx < len(split_labels) - 1 and remaining <= 0:
-            split_idx += 1
-            remaining = budgets[split_idx]
-
-        assignments[split_labels[split_idx]].append(row)
-        remaining -= int(row["n_frames"])
-
-    return assignments, budgets
-
-
-def assign_splits_by_ratio(
-    df: pd.DataFrame, split_labels: list[str], split_probs: np.ndarray, rng: np.random.Generator
-) -> pd.Series:
+    # Keep only the 2-class world: event_label + Nothing
+    df = df[df["label"].isin([args.event_label, "Nothing"])].copy()
     if df.empty:
-        return pd.Series(dtype=str)
-    total = len(df)
-    counts = [int(total * p) for p in split_probs]
-    counts[-1] += total - sum(counts)
-    indices = rng.permutation(df.index.to_numpy())
-    split_assignments: List[str] = []
-    for split, count in zip(split_labels, counts):
-        split_assignments.extend([split] * count)
-    return pd.Series(split_assignments, index=indices)
+        raise ValueError(f"No rows found for labels [{args.event_label}, Nothing]. Check your manifests.")
 
+    # Split stratified by label
+    df = stratified_split(df, split_labels, split_probs, seed=args.seed)
 
-def finalize_sequence_chunks(
-    chunks: List[np.ndarray],
-    segments: List[dict],
-    sr: int,
-    frame_length: int,
-    hop_length: int,
-) -> tuple[np.ndarray, List[dict], int]:
-    if not chunks:
-        raise RuntimeError("Cannot finalize an empty sequence.")
+    ensure_dir(args.output_dir)
+    split_manifest_path = args.output_dir / "manifest_split.csv"
+    df.to_csv(split_manifest_path, index=False)
+    logger.info("Saved split manifest: %s (rows=%d)", split_manifest_path, len(df))
 
-    combined = np.concatenate(chunks, axis=1)
-    truncated_segments = 0
-    enriched_segments: List[dict] = []
-    for seg in segments:
-        enriched_segments.append(
-            {
-                **seg,
-                "start_s": frames_to_seconds(seg["start_frame"], sr, frame_length, hop_length),
-                "end_s": frames_to_seconds(seg["end_frame"], sr, frame_length, hop_length),
-                "truncated": False,
-            }
-        )
-    return combined, enriched_segments, truncated_segments
+    all_summaries: List[dict] = []
+    all_segments: List[dict] = []
 
-
-def build_sequences_pack_all(
-    args: argparse.Namespace,
-    df: pd.DataFrame,
-    split_labels: list[str],
-    split_probs: np.ndarray,
-    rng: np.random.Generator,
-) -> pd.DataFrame:
-    max_seq_frames = None
-    if args.max_sequence_duration is not None:
-        max_seq_frames = frames_for_duration(
-            duration_s=args.max_sequence_duration,
-            sr=args.target_sr,
-            frame_length=args.frame_length,
-            hop_length=args.hop_length,
-        )
-        if max_seq_frames <= 0:
-            raise ValueError("max-sequence-duration must be positive when provided.")
-
-    assignments, budgets = allocate_fragments_by_split(df, split_labels, split_probs, rng)
-
-    logger.info(
-        "Pack-all mode: total_frames=%d -> budgets per split %s", int(df["n_frames"].sum()), budgets
-    )
-
-    ensure_output_dir(args.output_dir)
-    summary_records: List[dict] = []
-    segment_records: List[dict] = []
-    sequence_idx = 0
-
+    # One sequence per split
     for split in split_labels:
-        rows = assignments.get(split, [])
-        if not rows:
+        df_split = df[df["split"] == split].copy()
+        if df_split.empty:
+            logger.warning("Split '%s' is empty, skipping.", split)
             continue
 
-        chunks: List[np.ndarray] = []
-        segments: List[dict] = []
-        current_frames = 0
-        split_dir = args.output_dir / split
-
-        def flush_sequence() -> None:
-            nonlocal chunks, segments, current_frames, sequence_idx
-            if not chunks:
-                return
-            features, seq_segments, truncated_segments = finalize_sequence_chunks(
-                chunks, segments, args.target_sr, args.frame_length, args.hop_length
-            )
-            composition_stats = compute_composition_stats(
-                seq_segments,
-                total_frames=features.shape[1],
-                sr=args.target_sr,
-                frame_length=args.frame_length,
-                hop_length=args.hop_length,
-            )
-            summary_record, segment_list = save_sequence(
-                output_dir=split_dir,
-                sequence_idx=sequence_idx,
-                features=features,
-                segments=seq_segments,
-                sr=args.target_sr,
-                frame_length=args.frame_length,
-                hop_length=args.hop_length,
-                split=split,
-                pack_all_mode=True,
-                seed=args.seed,
-                expected_n_mels=args.expected_n_mels,
-                feature_type=FEATURE_TYPE,
-                db_ref=FEATURE_DB_REF,
-                top_db=FEATURE_TOP_DB,
-            )
-            summary_record.update(
-                {
-                    "skipped_too_long": 0,
-                    "fragment_limit_reached": False,
-                    "truncated_segments": truncated_segments,
-                }
-            )
-            summary_record.update(composition_stats)
-            summary_records.append(summary_record)
-            segment_records.extend(segment_list)
-            sequence_idx += 1
-            chunks = []
-            segments = []
-            current_frames = 0
-
-        for row in rows:
-            manifest_dir = Path(row["_manifest_dir"])
-            snippet_path = resolve_snippet_path(str(row["snippet_path"]), manifest_dir)
-            if not snippet_path.exists():
-                logger.warning("Skipping missing snippet %s", snippet_path)
-                continue
-
-            features = np.load(snippet_path)
-            features = normalize_feature_shape(features, args.expected_n_mels, snippet_path)
-            n_frames = features.shape[1]
-            if n_frames <= 0:
-                continue
-
-            if max_seq_frames is not None and current_frames > 0:
-                if current_frames + n_frames > max_seq_frames:
-                    flush_sequence()
-
-            start_frame = current_frames
-            end_frame = current_frames + n_frames
-            segments.append(
-                {
-                    "label": row["label"],
-                    "snippet_path": str(snippet_path),
-                    "start_frame": int(start_frame),
-                    "end_frame": int(end_frame),
-                }
-            )
-            chunks.append(features)
-            current_frames = end_frame
-
-            if max_seq_frames is not None and current_frames >= max_seq_frames:
-                flush_sequence()
-
-        flush_sequence()
-
-    summary_df = pd.DataFrame(summary_records)
-    segments_df = pd.DataFrame(segment_records)
-
-    summary_path = args.output_dir / "manifest_sequences_summary.csv"
-    summary_df.to_csv(summary_path, index=False)
-    logger.info("Saved %d sequence summaries to %s", len(summary_df), summary_path)
-
-    segment_path = args.output_dir / "manifest_sequences.csv"
-    segments_df.to_csv(segment_path, index=False)
-    logger.info("Saved %d sequence segments to %s", len(segments_df), segment_path)
-
-    for split in split_labels:
-        split_summary = summary_df[summary_df["split"] == split]
-        split_segments = segments_df[segments_df["split"] == split]
-        if not split_summary.empty:
-            split_summary_path = args.output_dir / split / "manifest_sequences_summary.csv"
-            ensure_output_dir(split_summary_path.parent)
-            split_summary.to_csv(split_summary_path, index=False)
-            logger.info("Saved %d %s sequence summaries to %s", len(split_summary), split, split_summary_path)
-        if not split_segments.empty:
-            split_segment_path = args.output_dir / split / "manifest_sequences.csv"
-            ensure_output_dir(split_segment_path.parent)
-            split_segments.to_csv(split_segment_path, index=False)
-            logger.info("Saved %d %s sequence segments to %s", len(split_segments), split, split_segment_path)
-
-    return summary_df
-
-
-def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-    fragments_dirs = args.fragments_dir or [DEFAULT_FRAGMENTS_DIR]
-
-    df = load_manifests(
-        fragment_dirs=fragments_dirs,
-        include_labels=args.include_labels,
-        exclude_labels=args.exclude_labels,
-    )
-
-    split_labels, split_probs = normalize_split_probs(
-        train=args.train_ratio, val=args.val_ratio, test=args.test_ratio
-    )
-
-    rng = np.random.default_rng(args.seed)
-    target_frames = 0
-
-    if args.pack_all_fragments and args.validate_composition:
-        raise ValueError("--validate-composition is not supported together with --pack-all-fragments.")
-
-    if args.pack_all_fragments and args.target_event_fragments is not None:
-        raise ValueError("--target-event-fragments is not supported together with --pack-all-fragments.")
-
-    if args.pack_all_fragments and args.split_by_fragment:
-        raise ValueError("--split-by-fragment is not supported together with --pack-all-fragments.")
-
-    if args.pack_all_fragments and args.split_by_event_fragments:
-        raise ValueError("--split-by-event-fragments is not supported together with --pack-all-fragments.")
-
-    if args.auto_sequences_by_split and not (args.split_by_fragment or args.split_by_event_fragments):
-        raise ValueError("--auto-sequences-by-split requires --split-by-fragment or --split-by-event-fragments.")
-
-    if args.variable_sequence_duration and not (args.split_by_fragment or args.split_by_event_fragments):
-        raise ValueError("--variable-sequence-duration requires --split-by-fragment or --split-by-event-fragments.")
-
-    if args.min_sequence_duration <= 0:
-        raise ValueError("--min-sequence-duration must be positive.")
-
-    if args.one_sequence_per_split and not (args.split_by_fragment or args.split_by_event_fragments):
-        raise ValueError("--one-sequence-per-split requires --split-by-fragment or --split-by-event-fragments.")
-
-    split_target_values = {
-        "train": args.target_event_fragments_train,
-        "val": args.target_event_fragments_val,
-        "test": args.target_event_fragments_test,
-    }
-    using_split_targets = any(value is not None for value in split_target_values.values())
-
-    if args.split_by_event_fragments and args.split_by_fragment:
-        raise ValueError("--split-by-event-fragments cannot be combined with --split-by-fragment.")
-
-    if args.split_by_event_fragments and using_split_targets:
-        raise ValueError("--split-by-event-fragments cannot be combined with per-split target-event-fragments.")
-
-    if using_split_targets and args.target_event_fragments is not None:
-        raise ValueError("Per-split target-event-fragments cannot be combined with --target-event-fragments.")
-
-    if using_split_targets and not args.split_by_fragment:
-        raise ValueError("--split-by-fragment is required when using per-split target-event-fragments.")
-
-    if args.target_event_fragments is not None and args.target_event_fragments <= 0:
-        raise ValueError("--target-event-fragments must be a positive integer.")
-
-    if using_split_targets:
-        for split, value in split_target_values.items():
-            if split_probs[split_labels.index(split)] > 0 and (value is None or value <= 0):
-                raise ValueError(f"--target-event-fragments-{split} must be a positive integer.")
-
-    event_label = args.event_label
-    if (
-        args.target_event_fragments is not None
-        or using_split_targets
-        or args.split_by_event_fragments
-        or args.split_by_fragment
-    ):
-        if event_label is None:
-            event_candidates = sorted({label for label in df["label"].unique() if label != "Nothing"})
-            if len(event_candidates) == 1:
-                event_label = event_candidates[0]
-                logger.info("Inferred event label '%s' for event fragment budgeting.", event_label)
-            else:
-                raise ValueError(
-                    "--event-label is required when using target-event-fragments and multiple event labels exist."
-                )
-
-    if args.target_event_fragments is not None:
-        event_df = df[df["label"] == event_label]
-        if event_df.empty:
-            raise ValueError(f"No fragments found for event label '{event_label}'.")
-        if len(event_df) < args.target_event_fragments:
-            raise ValueError(
-                f"Requested {args.target_event_fragments} event fragments but only {len(event_df)} available for '{event_label}'."
-            )
-        event_indices = rng.choice(event_df.index.to_numpy(), size=args.target_event_fragments, replace=False)
-        event_frames = int(event_df.loc[event_indices, "n_frames"].sum())
-        if event_frames <= 0:
-            raise ValueError("Selected event fragments have non-positive frame totals.")
-        target_frames = int(event_frames * 2)
-        logger.info(
-            "Using %d event fragments (%s) totaling %d frames -> target_frames=%d for 50/50 balance.",
-            args.target_event_fragments,
-            event_label,
-            event_frames,
-            target_frames,
+        # Build 50/50 by frames (event is anchor)
+        features, segments, meta = build_one_sequence_50_50(
+            df_split=df_split,
+            event_label=args.event_label,
+            expected_n_mels=args.expected_n_mels,
+            seed=args.seed + (0 if split == "train" else 1 if split == "val" else 2),
         )
-    elif not using_split_targets and not args.split_by_event_fragments:
-        target_frames = frames_for_duration(
-            duration_s=args.sequence_duration,
-            sr=args.target_sr,
-            frame_length=args.frame_length,
-            hop_length=args.hop_length,
-        )
-        if target_frames <= 0:
-            raise ValueError("sequence-duration must be positive.")
 
-    target_frames_by_split: Dict[str, int] = {}
-
-    if args.pack_all_fragments:
-        return build_sequences_pack_all(args, df, split_labels, split_probs, rng)
-
-    summary_records: List[dict] = []
-    segment_records: List[dict] = []
-
-    split_by_pool = args.split_by_fragment or args.split_by_event_fragments
-
-    if args.split_by_event_fragments:
-        ensure_output_dir(args.output_dir)
-        split_assignments = pd.Series(index=df.index, dtype=str)
-        for label in df["label"].unique():
-            label_df = df[df["label"] == label]
-            label_splits = assign_splits_by_ratio(label_df, split_labels, split_probs, rng)
-            split_assignments.loc[label_splits.index] = label_splits.values
-        if split_assignments.isnull().any():
-            raise ValueError("Unable to assign splits for all fragments when using --split-by-event-fragments.")
-        df = df.copy()
-        df["split"] = split_assignments.values
-        split_manifest_path = args.output_dir / "manifest_split.csv"
-        df.to_csv(split_manifest_path, index=False)
-        logger.info("Saved split manifest with %d fragments to %s", len(df), split_manifest_path)
-
-        event_df = df[df["label"] == event_label]
-        for split in split_labels:
-            split_event = event_df[event_df["split"] == split]
-            if split_probs[split_labels.index(split)] > 0 and split_event.empty:
-                raise ValueError(f"No fragments found for event label '{event_label}' in split '{split}'.")
-            event_frames = int(split_event["n_frames"].sum())
-            if event_frames <= 0 and split_probs[split_labels.index(split)] > 0:
-                raise ValueError(f"Event fragments in split '{split}' have non-positive frame totals.")
-            target_frames_by_split[split] = int(event_frames * 2)
-            logger.info(
-                "Split %s: event_label=%s frames=%d -> target_frames=%d.",
-                split,
-                event_label,
-                event_frames,
-                target_frames_by_split[split],
-            )
-
-    if args.split_by_fragment:
-        ensure_output_dir(args.output_dir)
-        total_fragments = len(df)
-        if total_fragments <= 0:
-            raise ValueError("No fragments available to split.")
-        counts = [int(total_fragments * p) for p in split_probs]
-        counts[-1] += total_fragments - sum(counts)
-        indices = rng.permutation(df.index.to_numpy())
-        split_assignments: List[str] = []
-        for split, count in zip(split_labels, counts):
-            split_assignments.extend([split] * count)
-        df = df.loc[indices].copy()
-        df["split"] = split_assignments
-        split_manifest_path = args.output_dir / "manifest_split.csv"
-        df.to_csv(split_manifest_path, index=False)
-        logger.info("Saved split manifest with %d fragments to %s", len(df), split_manifest_path)
-        if using_split_targets:
-            for split, target_count in split_target_values.items():
-                if target_count is None:
-                    continue
-                split_df = df[df["split"] == split]
-                event_df = split_df[split_df["label"] == event_label]
-                if event_df.empty:
-                    raise ValueError(f"No fragments found for event label '{event_label}' in split '{split}'.")
-                if len(event_df) < target_count:
-                    raise ValueError(
-                        f"Requested {target_count} event fragments for split '{split}' but only {len(event_df)} available."
-                    )
-                event_indices = rng.choice(event_df.index.to_numpy(), size=target_count, replace=False)
-                event_frames = int(event_df.loc[event_indices, "n_frames"].sum())
-                if event_frames <= 0:
-                    raise ValueError(f"Selected event fragments for split '{split}' have non-positive frame totals.")
-                target_frames_by_split[split] = int(event_frames * 2)
-                logger.info(
-                    "Split %s: using %d event fragments (%s) totaling %d frames -> target_frames=%d.",
-                    split,
-                    target_count,
-                    event_label,
-                    event_frames,
-                    target_frames_by_split[split],
-                )
-        else:
-            if event_label is None:
-                raise ValueError("--event-label is required to compute per-split target frames.")
-            for split in split_labels:
-                split_df = df[df["split"] == split]
-                event_df = split_df[split_df["label"] == event_label]
-                if split_probs[split_labels.index(split)] > 0 and event_df.empty:
-                    raise ValueError(f"No fragments found for event label '{event_label}' in split '{split}'.")
-                event_frames = int(event_df["n_frames"].sum())
-                if event_frames <= 0 and split_probs[split_labels.index(split)] > 0:
-                    raise ValueError(f"Event fragments in split '{split}' have non-positive frame totals.")
-                target_frames_by_split[split] = int(event_frames * 2)
-                logger.info(
-                    "Split %s: event_label=%s frames=%d -> target_frames=%d.",
-                    split,
-                    event_label,
-                    event_frames,
-                    target_frames_by_split[split],
-                )
-
-    if args.dry_run_budgets:
-        if not target_frames_by_split:
-            raise ValueError("--dry-run-budgets requires per-split frame budgets.")
-        min_sequence_frames = frames_for_duration(
-            duration_s=args.min_sequence_duration,
-            sr=args.target_sr,
-            frame_length=args.frame_length,
-            hop_length=args.hop_length,
-        )
-        if min_sequence_frames <= 0:
-            raise ValueError("--min-sequence-duration must be positive.")
-        for split in split_labels:
-            budget = target_frames_by_split.get(split, 0)
-            event_frames = int(budget // 2) if budget > 0 else 0
-            min_event_frames_per_sequence = max(int(min_sequence_frames // 2), 1)
-            max_sequences = int(event_frames // min_event_frames_per_sequence)
-            logger.info(
-                "Split %s: max_sequences=%d (event_frames=%d, min_seq_frames=%d).",
-                split,
-                max_sequences,
-                event_frames,
-                min_sequence_frames,
-            )
-        return pd.DataFrame()
-
-    if args.validate_composition:
-        if split_by_pool:
-            df = df[df["split"] == split_labels[0]]
-            if df.empty:
-                raise ValueError(f"No fragments available for split '{split_labels[0]}' to validate.")
-        sequence_target_frames = target_frames
-        if args.auto_sequences_by_split:
-            sequence_target_frames = frames_for_duration(
-                duration_s=args.sequence_duration,
-                sr=args.target_sr,
-                frame_length=args.frame_length,
-                hop_length=args.hop_length,
-            )
-            if sequence_target_frames <= 0:
-                raise ValueError("sequence-duration must be positive.")
-        features, segments, meta = build_sequence(
-            df=df,
-            target_frames=sequence_target_frames,
+        # Save
+        summary, seg_rows = save_sequence_and_manifests(
+            output_dir=args.output_dir,
+            split=split,
+            features=features,
+            segments=segments,
+            meta=meta,
             sr=args.target_sr,
             frame_length=args.frame_length,
             hop_length=args.hop_length,
             expected_n_mels=args.expected_n_mels,
-            nothing_ratio=args.nothing_ratio,
-            rng=rng,
-            max_fragments=args.max_fragments_per_sequence,
-            allow_partial_fragments=args.allow_partial_fragments,
-            max_consecutive_event_fragments=args.max_consecutive_event_fragments,
-            max_consecutive_event_frames=args.max_consecutive_event_frames,
-            min_nothing_after_event_frames=args.min_nothing_after_event_frames,
-            consume_labels=None,
-            strict_label_budgets=args.strict_label_budgets,
         )
 
-        logger.info("Validation timeline (label, start_frame -> end_frame, truncated):")
-        for seg in segments:
-            logger.info(
-                "  %s: %d -> %d (truncated=%s)",
-                seg["label"],
-                int(seg["start_frame"]),
-                int(seg["end_frame"]),
-                bool(seg.get("truncated", False)),
-            )
+        all_summaries.append(summary)
+        all_segments.extend(seg_rows)
 
-        composition = meta.get("composition", {})
-        logger.info("Composition metrics: %s", composition)
-        logger.info("Generated validation sequence with shape %s", features.shape)
-        return pd.DataFrame([composition])
+        logger.info(
+            "Split %s: total_frames=%d | event=%d | nothing=%d | pct_event=%.4f | pct_nothing=%.4f",
+            split,
+            summary["total_frames"],
+            summary["frames_event"],
+            summary["frames_nothing"],
+            summary["pct_event"],
+            summary["pct_nothing"],
+        )
 
-    consume_labels = None
-    if args.use_all_event_fragments:
-        consume_labels = {label for label in df["label"].unique() if label != "Nothing"}
-        if not consume_labels:
-            raise ValueError("--use-all-event-fragments requires at least one non-Nothing label.")
-        if split_by_pool and not args.auto_sequences_by_split:
-            logger.warning(
-                "--use-all-event-fragments is enabled without --auto-sequences-by-split; "
-                "ensure --num-sequences and --sequence-duration are large enough to consume all events."
-            )
-
-    if split_by_pool:
-        sequence_target_frames = target_frames
-        if args.one_sequence_per_split:
-            sequence_target_frames = target_frames
-            if not target_frames_by_split:
-                raise ValueError("--one-sequence-per-split requires per-split frame budgets.")
-            seq_counts = [1 if split_probs[idx] > 0 else 0 for idx, split in enumerate(split_labels)]
-        elif args.variable_sequence_duration:
-            if not target_frames_by_split:
-                raise ValueError("--variable-sequence-duration requires per-split frame budgets.")
-            min_sequence_frames = frames_for_duration(
-                duration_s=args.min_sequence_duration,
-                sr=args.target_sr,
-                frame_length=args.frame_length,
-                hop_length=args.hop_length,
-            )
-            if min_sequence_frames <= 0:
-                raise ValueError("--min-sequence-duration must be positive.")
-            seq_counts = [0 for _ in split_labels]
-        else:
-            if args.auto_sequences_by_split:
-                sequence_target_frames = frames_for_duration(
-                    duration_s=args.sequence_duration,
-                    sr=args.target_sr,
-                    frame_length=args.frame_length,
-                    hop_length=args.hop_length,
-                )
-                if sequence_target_frames <= 0:
-                    raise ValueError("sequence-duration must be positive.")
-                if not target_frames_by_split:
-                    raise ValueError("--auto-sequences-by-split requires per-split frame budgets.")
-                seq_counts = []
-                for split in split_labels:
-                    if split_probs[split_labels.index(split)] <= 0:
-                        seq_counts.append(0)
-                        continue
-                    budget = target_frames_by_split.get(split, 0)
-                    if budget <= 0:
-                        seq_counts.append(0)
-                    else:
-                        planned = int(np.ceil(budget / sequence_target_frames))
-                        event_frames = int(budget // 2) if budget > 0 else 0
-                        min_event_frames_per_sequence = max(int(sequence_target_frames // 2), 1)
-                        max_sequences = int(event_frames // min_event_frames_per_sequence)
-                        if max_sequences <= 0:
-                            seq_counts.append(0)
-                            continue
-                        if max_sequences < planned:
-                            logger.info(
-                                "Capping sequences for split %s from %d to %d due to event frame availability.",
-                                split,
-                                planned,
-                                max_sequences,
-                            )
-                        seq_counts.append(min(planned, max_sequences))
-                logger.info(
-                    "Auto sequence counts by split (sequence_frames=%d): %s",
-                    sequence_target_frames,
-                    dict(zip(split_labels, seq_counts)),
-                )
-            else:
-                seq_counts = [int(args.num_sequences * p) for p in split_probs]
-                seq_counts[-1] += args.num_sequences - sum(seq_counts)
-        seq_idx = 0
-        for split, split_count in zip(split_labels, seq_counts):
-            if not args.variable_sequence_duration and split_count <= 0:
-                continue
-            split_df = df[df["split"] == split]
-            if split_df.empty:
-                raise ValueError(f"No fragments available for split '{split}'.")
-            split_dir = args.output_dir / split
-            remaining_split_by_label: Optional[Dict[str, int]] = None
-            if target_frames_by_split and event_label is not None:
-                split_target_frames = target_frames_by_split.get(split, 0)
-                if split_target_frames > 0:
-                    event_budget = int(split_target_frames // 2)
-                    remaining_split_by_label = {
-                        "Nothing": int(split_target_frames - event_budget),
-                        event_label: event_budget,
-                    }
-            if remaining_split_by_label:
-                min_sequence_frames = frames_for_duration(
-                    duration_s=args.min_sequence_duration,
-                    sr=args.target_sr,
-                    frame_length=args.frame_length,
-                    hop_length=args.hop_length,
-                )
-                if min_sequence_frames > remaining_split_by_label.get(event_label, 0):
-                    msg = (
-                        f"Split {split}: not enough event frames to reach min sequence duration "
-                        f"({remaining_split_by_label.get(event_label, 0)} < {min_sequence_frames})."
-                    )
-                    if args.strict_label_budgets:
-                        raise ValueError(msg)
-                    logger.warning(msg)
-                    continue
-            split_seq_idx = 0
-            while True:
-                if args.one_sequence_per_split:
-                    if split_seq_idx >= 1:
-                        break
-                    if not remaining_split_by_label:
-                        break
-                    target_frames_by_label = {
-                        label: int(remaining)
-                        for label, remaining in remaining_split_by_label.items()
-                    }
-                    sequence_target_frames = int(sum(remaining_split_by_label.values()))
-                elif args.variable_sequence_duration:
-                    if not remaining_split_by_label:
-                        break
-                    total_remaining = int(sum(remaining_split_by_label.values()))
-                    if total_remaining < min_sequence_frames:
-                        break
-                    target_frames_by_label = {
-                        label: int(remaining)
-                        for label, remaining in remaining_split_by_label.items()
-                    }
-                    sequence_target_frames = total_remaining
-                else:
-                    if split_seq_idx >= split_count:
-                        break
-                    target_frames_by_label = None
-                    if remaining_split_by_label:
-                        remaining_sequences = max(split_count - split_seq_idx, 1)
-                        target_frames_by_label = {
-                            label: int(np.ceil(remaining / remaining_sequences))
-                            for label, remaining in remaining_split_by_label.items()
-                        }
-                features, segments, meta = build_sequence(
-                    df=split_df,
-                    target_frames=sequence_target_frames,
-                    sr=args.target_sr,
-                    frame_length=args.frame_length,
-                    hop_length=args.hop_length,
-                    expected_n_mels=args.expected_n_mels,
-                    nothing_ratio=args.nothing_ratio,
-                    rng=rng,
-                    max_fragments=args.max_fragments_per_sequence,
-                    allow_partial_fragments=args.allow_partial_fragments,
-                    max_consecutive_event_fragments=args.max_consecutive_event_fragments,
-                    max_consecutive_event_frames=args.max_consecutive_event_frames,
-                    min_nothing_after_event_frames=args.min_nothing_after_event_frames,
-                    consume_labels=consume_labels,
-                    target_frames_by_label=target_frames_by_label,
-                    strict_label_budgets=args.strict_label_budgets,
-                )
-                if remaining_split_by_label:
-                    composition = meta.get("composition", {})
-                    frames_by_label = composition.get("frames_by_label")
-                    if isinstance(frames_by_label, str):
-                        frames_by_label = json.loads(frames_by_label)
-                    if isinstance(frames_by_label, dict):
-                        for label, used in frames_by_label.items():
-                            if label in remaining_split_by_label:
-                                remaining_split_by_label[label] = max(
-                                    remaining_split_by_label[label] - int(used), 0
-                                )
-
-                summary_record, seq_segments = save_sequence(
-                    output_dir=split_dir,
-                    sequence_idx=seq_idx,
-                    features=features,
-                    segments=segments,
-                    sr=args.target_sr,
-                    frame_length=args.frame_length,
-                    hop_length=args.hop_length,
-                    split=split,
-                    pack_all_mode=False,
-                    seed=args.seed,
-                    expected_n_mels=args.expected_n_mels,
-                    feature_type=FEATURE_TYPE,
-                    db_ref=FEATURE_DB_REF,
-                    top_db=FEATURE_TOP_DB,
-                )
-                summary_record.update(
-                    {
-                        "skipped_too_long": meta["skipped_too_long"],
-                        "fragment_limit_reached": meta["fragment_limit_reached"],
-                        "truncated_segments": meta["truncated_segments"],
-                    }
-                )
-                summary_record.update(meta.get("composition", {}))
-                summary_records.append(summary_record)
-                segment_records.extend(seq_segments)
-                if args.strict_label_budgets and meta.get("sequence_truncated_by_budget"):
-                    raise ValueError(
-                        "Label budgets exhausted before reaching 50/50 balance. "
-                        "Reduce the number of sequences or generate more event fragments."
-                    )
-                seq_idx += 1
-                split_seq_idx += 1
-    else:
-        for seq_idx in range(args.num_sequences):
-            features, segments, meta = build_sequence(
-                df=df,
-                target_frames=target_frames,
-                sr=args.target_sr,
-                frame_length=args.frame_length,
-                hop_length=args.hop_length,
-                expected_n_mels=args.expected_n_mels,
-                nothing_ratio=args.nothing_ratio,
-                rng=rng,
-                max_fragments=args.max_fragments_per_sequence,
-                allow_partial_fragments=args.allow_partial_fragments,
-                max_consecutive_event_fragments=args.max_consecutive_event_fragments,
-                max_consecutive_event_frames=args.max_consecutive_event_frames,
-                min_nothing_after_event_frames=args.min_nothing_after_event_frames,
-                consume_labels=consume_labels,
-                strict_label_budgets=args.strict_label_budgets,
-            )
-
-            split = rng.choice(split_labels, p=split_probs)
-            split_dir = args.output_dir / split
-
-            summary_record, seq_segments = save_sequence(
-                output_dir=split_dir,
-                sequence_idx=seq_idx,
-                features=features,
-                segments=segments,
-                sr=args.target_sr,
-                frame_length=args.frame_length,
-                hop_length=args.hop_length,
-                split=split,
-                pack_all_mode=False,
-                seed=args.seed,
-                expected_n_mels=args.expected_n_mels,
-                feature_type=FEATURE_TYPE,
-                db_ref=FEATURE_DB_REF,
-                top_db=FEATURE_TOP_DB,
-            )
-            summary_record.update(
-                {
-                    "skipped_too_long": meta["skipped_too_long"],
-                    "fragment_limit_reached": meta["fragment_limit_reached"],
-                    "truncated_segments": meta["truncated_segments"],
-                }
-            )
-            summary_record.update(meta.get("composition", {}))
-            summary_records.append(summary_record)
-            segment_records.extend(seq_segments)
-            if args.strict_label_budgets and meta.get("sequence_truncated_by_budget"):
-                raise ValueError(
-                    "Label budgets exhausted before reaching 50/50 balance. "
-                    "Reduce the number of sequences or generate more event fragments."
-                )
-
-    summary_df = pd.DataFrame(summary_records)
-    segments_df = pd.DataFrame(segment_records)
-    ensure_output_dir(args.output_dir)
-
+    # Global manifests
     summary_path = args.output_dir / "manifest_sequences_summary.csv"
-    summary_df.to_csv(summary_path, index=False)
-    logger.info("Saved %d sequence summaries to %s", len(summary_df), summary_path)
-
-    segment_path = args.output_dir / "manifest_sequences.csv"
-    segments_df.to_csv(segment_path, index=False)
-    logger.info("Saved %d sequence segments to %s", len(segments_df), segment_path)
-
-    for split in split_labels:
-        split_summary = summary_df[summary_df["split"] == split]
-        split_segments = segments_df[segments_df["split"] == split]
-        if not split_summary.empty:
-            split_summary_path = args.output_dir / split / "manifest_sequences_summary.csv"
-            ensure_output_dir(split_summary_path.parent)
-            split_summary.to_csv(split_summary_path, index=False)
-            logger.info("Saved %d %s sequence summaries to %s", len(split_summary), split, split_summary_path)
-        if not split_segments.empty:
-            split_segment_path = args.output_dir / split / "manifest_sequences.csv"
-            ensure_output_dir(split_segment_path.parent)
-            split_segments.to_csv(split_segment_path, index=False)
-            logger.info("Saved %d %s sequence segments to %s", len(split_segments), split, split_segment_path)
-    return summary_df
-
-
-def main(cli_args: Optional[Sequence[str]] = None) -> None:
-    args = parse_args(cli_args)
-    build_sequences(args)
+    segments_path = args.output_dir / "manifest_sequences.csv"
+    pd.DataFrame(all_summaries).to_csv(summary_path, index=False)
+    pd.DataFrame(all_segments).to_csv(segments_path, index=False)
+    logger.info("Saved global summary: %s", summary_path)
+    logger.info("Saved global segments: %s", segments_path)
 
 
 if __name__ == "__main__":
