@@ -267,6 +267,16 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dry-run-budgets",
+        action="store_true",
+        help="Compute per-split budget feasibility and exit before building sequences.",
+    )
+    parser.add_argument(
+        "--one-sequence-per-split",
+        action="store_true",
+        help="Generate a single sequence per split using the remaining per-split budgets.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
@@ -1049,6 +1059,9 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     if args.min_sequence_duration <= 0:
         raise ValueError("--min-sequence-duration must be positive.")
 
+    if args.one_sequence_per_split and not (args.split_by_fragment or args.split_by_event_fragments):
+        raise ValueError("--one-sequence-per-split requires --split-by-fragment or --split-by-event-fragments.")
+
     split_target_values = {
         "train": args.target_event_fragments_train,
         "val": args.target_event_fragments_val,
@@ -1226,6 +1239,31 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                     target_frames_by_split[split],
                 )
 
+    if args.dry_run_budgets:
+        if not target_frames_by_split:
+            raise ValueError("--dry-run-budgets requires per-split frame budgets.")
+        min_sequence_frames = frames_for_duration(
+            duration_s=args.min_sequence_duration,
+            sr=args.target_sr,
+            frame_length=args.frame_length,
+            hop_length=args.hop_length,
+        )
+        if min_sequence_frames <= 0:
+            raise ValueError("--min-sequence-duration must be positive.")
+        for split in split_labels:
+            budget = target_frames_by_split.get(split, 0)
+            event_frames = int(budget // 2) if budget > 0 else 0
+            min_event_frames_per_sequence = max(int(min_sequence_frames // 2), 1)
+            max_sequences = int(event_frames // min_event_frames_per_sequence)
+            logger.info(
+                "Split %s: max_sequences=%d (event_frames=%d, min_seq_frames=%d).",
+                split,
+                max_sequences,
+                event_frames,
+                min_sequence_frames,
+            )
+        return pd.DataFrame()
+
     if args.validate_composition:
         if split_by_pool:
             df = df[df["split"] == split_labels[0]]
@@ -1299,6 +1337,11 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
             if min_sequence_frames <= 0:
                 raise ValueError("--min-sequence-duration must be positive.")
             seq_counts = [0 for _ in split_labels]
+        elif args.one_sequence_per_split:
+            sequence_target_frames = target_frames
+            if not target_frames_by_split:
+                raise ValueError("--one-sequence-per-split requires per-split frame budgets.")
+            seq_counts = [1 if split_probs[idx] > 0 else 0 for idx, split in enumerate(split_labels)]
         else:
             if args.auto_sequences_by_split:
                 sequence_target_frames = frames_for_duration(
@@ -1360,6 +1403,22 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                         "Nothing": int(split_target_frames - event_budget),
                         event_label: event_budget,
                     }
+            if remaining_split_by_label:
+                min_sequence_frames = frames_for_duration(
+                    duration_s=args.min_sequence_duration,
+                    sr=args.target_sr,
+                    frame_length=args.frame_length,
+                    hop_length=args.hop_length,
+                )
+                if min_sequence_frames > remaining_split_by_label.get(event_label, 0):
+                    msg = (
+                        f"Split {split}: not enough event frames to reach min sequence duration "
+                        f"({remaining_split_by_label.get(event_label, 0)} < {min_sequence_frames})."
+                    )
+                    if args.strict_label_budgets:
+                        raise ValueError(msg)
+                    logger.warning(msg)
+                    continue
             split_seq_idx = 0
             while True:
                 if args.variable_sequence_duration:
@@ -1373,6 +1432,16 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                         for label, remaining in remaining_split_by_label.items()
                     }
                     sequence_target_frames = total_remaining
+                elif args.one_sequence_per_split:
+                    if split_seq_idx >= 1:
+                        break
+                    if not remaining_split_by_label:
+                        break
+                    target_frames_by_label = {
+                        label: int(remaining)
+                        for label, remaining in remaining_split_by_label.items()
+                    }
+                    sequence_target_frames = int(sum(remaining_split_by_label.values()))
                 else:
                     if split_seq_idx >= split_count:
                         break
