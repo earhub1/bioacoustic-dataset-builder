@@ -252,6 +252,21 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--variable-sequence-duration",
+        action="store_true",
+        help=(
+            "Allow sequences to use the remaining per-split budget instead of a fixed --sequence-duration."
+        ),
+    )
+    parser.add_argument(
+        "--min-sequence-duration",
+        type=float,
+        default=1.0,
+        help=(
+            "Minimum duration (seconds) for variable-length sequences when --variable-sequence-duration is set."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
@@ -1028,6 +1043,12 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
     if args.auto_sequences_by_split and not (args.split_by_fragment or args.split_by_event_fragments):
         raise ValueError("--auto-sequences-by-split requires --split-by-fragment or --split-by-event-fragments.")
 
+    if args.variable_sequence_duration and not (args.split_by_fragment or args.split_by_event_fragments):
+        raise ValueError("--variable-sequence-duration requires --split-by-fragment or --split-by-event-fragments.")
+
+    if args.min_sequence_duration <= 0:
+        raise ValueError("--min-sequence-duration must be positive.")
+
     split_target_values = {
         "train": args.target_event_fragments_train,
         "val": args.target_event_fragments_val,
@@ -1266,52 +1287,65 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
 
     if split_by_pool:
         sequence_target_frames = target_frames
-        if args.auto_sequences_by_split:
-            sequence_target_frames = frames_for_duration(
-                duration_s=args.sequence_duration,
+        if args.variable_sequence_duration:
+            if not target_frames_by_split:
+                raise ValueError("--variable-sequence-duration requires per-split frame budgets.")
+            min_sequence_frames = frames_for_duration(
+                duration_s=args.min_sequence_duration,
                 sr=args.target_sr,
                 frame_length=args.frame_length,
                 hop_length=args.hop_length,
             )
-            if sequence_target_frames <= 0:
-                raise ValueError("sequence-duration must be positive.")
-            if not target_frames_by_split:
-                raise ValueError("--auto-sequences-by-split requires per-split frame budgets.")
-            seq_counts = []
-            for split in split_labels:
-                if split_probs[split_labels.index(split)] <= 0:
-                    seq_counts.append(0)
-                    continue
-                budget = target_frames_by_split.get(split, 0)
-                if budget <= 0:
-                    seq_counts.append(0)
-                else:
-                    planned = int(np.ceil(budget / sequence_target_frames))
-                    event_frames = int(budget // 2) if budget > 0 else 0
-                    min_event_frames_per_sequence = max(int(sequence_target_frames // 2), 1)
-                    max_sequences = int(event_frames // min_event_frames_per_sequence)
-                    if max_sequences <= 0:
+            if min_sequence_frames <= 0:
+                raise ValueError("--min-sequence-duration must be positive.")
+            seq_counts = [0 for _ in split_labels]
+        else:
+            if args.auto_sequences_by_split:
+                sequence_target_frames = frames_for_duration(
+                    duration_s=args.sequence_duration,
+                    sr=args.target_sr,
+                    frame_length=args.frame_length,
+                    hop_length=args.hop_length,
+                )
+                if sequence_target_frames <= 0:
+                    raise ValueError("sequence-duration must be positive.")
+                if not target_frames_by_split:
+                    raise ValueError("--auto-sequences-by-split requires per-split frame budgets.")
+                seq_counts = []
+                for split in split_labels:
+                    if split_probs[split_labels.index(split)] <= 0:
                         seq_counts.append(0)
                         continue
-                    if max_sequences < planned:
-                        logger.info(
-                            "Capping sequences for split %s from %d to %d due to event frame availability.",
-                            split,
-                            planned,
-                            max_sequences,
-                        )
-                    seq_counts.append(min(planned, max_sequences))
-            logger.info(
-                "Auto sequence counts by split (sequence_frames=%d): %s",
-                sequence_target_frames,
-                dict(zip(split_labels, seq_counts)),
-            )
-        else:
-            seq_counts = [int(args.num_sequences * p) for p in split_probs]
-            seq_counts[-1] += args.num_sequences - sum(seq_counts)
+                    budget = target_frames_by_split.get(split, 0)
+                    if budget <= 0:
+                        seq_counts.append(0)
+                    else:
+                        planned = int(np.ceil(budget / sequence_target_frames))
+                        event_frames = int(budget // 2) if budget > 0 else 0
+                        min_event_frames_per_sequence = max(int(sequence_target_frames // 2), 1)
+                        max_sequences = int(event_frames // min_event_frames_per_sequence)
+                        if max_sequences <= 0:
+                            seq_counts.append(0)
+                            continue
+                        if max_sequences < planned:
+                            logger.info(
+                                "Capping sequences for split %s from %d to %d due to event frame availability.",
+                                split,
+                                planned,
+                                max_sequences,
+                            )
+                        seq_counts.append(min(planned, max_sequences))
+                logger.info(
+                    "Auto sequence counts by split (sequence_frames=%d): %s",
+                    sequence_target_frames,
+                    dict(zip(split_labels, seq_counts)),
+                )
+            else:
+                seq_counts = [int(args.num_sequences * p) for p in split_probs]
+                seq_counts[-1] += args.num_sequences - sum(seq_counts)
         seq_idx = 0
         for split, split_count in zip(split_labels, seq_counts):
-            if split_count <= 0:
+            if not args.variable_sequence_duration and split_count <= 0:
                 continue
             split_df = df[df["split"] == split]
             if split_df.empty:
@@ -1326,14 +1360,29 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                         "Nothing": int(split_target_frames - event_budget),
                         event_label: event_budget,
                     }
-            for split_seq_idx in range(split_count):
-                target_frames_by_label = None
-                if remaining_split_by_label:
-                    remaining_sequences = max(split_count - split_seq_idx, 1)
+            split_seq_idx = 0
+            while True:
+                if args.variable_sequence_duration:
+                    if not remaining_split_by_label:
+                        break
+                    total_remaining = int(sum(remaining_split_by_label.values()))
+                    if total_remaining < min_sequence_frames:
+                        break
                     target_frames_by_label = {
-                        label: int(np.ceil(remaining / remaining_sequences))
+                        label: int(remaining)
                         for label, remaining in remaining_split_by_label.items()
                     }
+                    sequence_target_frames = total_remaining
+                else:
+                    if split_seq_idx >= split_count:
+                        break
+                    target_frames_by_label = None
+                    if remaining_split_by_label:
+                        remaining_sequences = max(split_count - split_seq_idx, 1)
+                        target_frames_by_label = {
+                            label: int(np.ceil(remaining / remaining_sequences))
+                            for label, remaining in remaining_split_by_label.items()
+                        }
                 features, segments, meta = build_sequence(
                     df=split_df,
                     target_frames=sequence_target_frames,
@@ -1396,6 +1445,7 @@ def build_sequences(args: argparse.Namespace) -> pd.DataFrame:
                         "Reduce the number of sequences or generate more event fragments."
                     )
                 seq_idx += 1
+                split_seq_idx += 1
     else:
         for seq_idx in range(args.num_sequences):
             features, segments, meta = build_sequence(
