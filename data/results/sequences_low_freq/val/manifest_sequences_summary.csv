@@ -1,0 +1,2 @@
+sequence_path,sequence_idx,split,total_frames,total_duration_s,mel_bins,frames_event,frames_nothing,pct_event,pct_nothing,n_segments
+data\results\sequences_low_freq\val\sequence_0.npy,0,val,6352,635.2,13,3176,3176,0.5,0.5,113

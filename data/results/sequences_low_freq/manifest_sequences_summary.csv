@@ -1,0 +1,4 @@
+sequence_path,sequence_idx,split,total_frames,total_duration_s,mel_bins,frames_event,frames_nothing,pct_event,pct_nothing,n_segments
+data\results\sequences_low_freq\train\sequence_0.npy,0,train,26116,2611.6,13,13058,13058,0.5,0.5,401
+data\results\sequences_low_freq\val\sequence_0.npy,0,val,6352,635.2,13,3176,3176,0.5,0.5,113
+data\results\sequences_low_freq\test\sequence_0.npy,0,test,3026,302.6,13,1513,1513,0.5,0.5,54
