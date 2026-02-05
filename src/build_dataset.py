@@ -1,12 +1,13 @@
 # build_dataset_balanced.py
 # -*- coding: utf-8 -*-
 """
-Build 1 balanced (50/50 by frames) sequence per split from fragment manifests.
+Build 1 balanced (50/50 by frames) *INTERLEAVED* sequence per split from fragment manifests.
 
-Usage example (similar to your previous command):
+Usage example:
 python src/build_dataset_balanced.py \
   --fragments-dir data/results/fragments_combined/fragments_32khz \
   --event-label G01 \
+  --expected-n-mels 13 \
   --output-dir data/results/sequences_low_freq \
   --seed 42 \
   --train-ratio 0.7 --val-ratio 0.2 --test-ratio 0.1
@@ -22,6 +23,7 @@ What it guarantees:
 - For each split (train/val/test): 1 sequence with frames(G01) == frames(Nothing) (50/50)
 - All event fragments in that split are used (no dropping of G01)
 - Excess Nothing is ignored (removed by not being selected)
+- The ORDER is INTERLEAVED (reproducible by seed), avoiding the "all G01 then all Nothing" artifact
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ DEFAULT_OUTPUT_DIR = Path("data/results/sequences_balanced")
 
 def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Build 1 balanced sequence per split (50/50 by frames) from fragments manifests."
+        description="Build 1 balanced, interleaved sequence per split (50/50 by frames) from fragments manifests."
     )
     p.add_argument(
         "--fragments-dir",
@@ -91,6 +93,12 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=6400,
         help="Hop length in samples (default 6400).",
     )
+    p.add_argument(
+        "--max-run-same-label",
+        type=int,
+        default=3,
+        help="Max consecutive chunks of the same label in the assembled sequence (default 3).",
+    )
     return p.parse_args(args=args)
 
 
@@ -111,11 +119,9 @@ def resolve_snippet_path(snippet: str, manifest_dir: Path) -> Path:
     if path.is_absolute() or ":" in snippet:
         return path
 
-    # If it already exists as given, keep it
     if path.exists():
         return path
 
-    # Otherwise treat as relative to manifest_dir
     return manifest_dir / path
 
 
@@ -204,112 +210,193 @@ def load_fragment(row: pd.Series, expected_n_mels: int) -> Tuple[np.ndarray, Pat
     return feat, snippet_path
 
 
-def build_one_sequence_50_50(
+def build_one_sequence_50_50_interleaved(
     df_split: pd.DataFrame,
     event_label: str,
     expected_n_mels: int,
     seed: int,
+    max_run_same_label: int = 3,
 ) -> Tuple[np.ndarray, List[dict], Dict[str, int]]:
     """
-    Build a single sequence where:
-      - All event fragments in df_split are included (shuffled)
-      - Nothing fragments are added until frames(Nothing) == frames(event)
-      - Nothing can be reused with replacement if needed
-      - The last Nothing may be truncated to fit exactly
+    Build a single sequence 50/50 by frames, but INTERLEAVED.
+
+    Guarantees:
+      - Uses ALL event fragments in this split as anchor (no dropping of G01)
+      - Adds Nothing fragments until frames(Nothing) == frames(Event)
+      - Nothing can be reused (replacement) and may be truncated at the end
+      - Interleaves by deficit scheduling + run limit (reproducible via seed)
     """
     rng = np.random.default_rng(seed)
 
-    events = df_split[df_split["label"] == event_label].copy()
-    nothings = df_split[df_split["label"] == "Nothing"].copy()
+    events_df = df_split[df_split["label"] == event_label].copy()
+    nothings_df = df_split[df_split["label"] == "Nothing"].copy()
 
-    if events.empty:
+    if events_df.empty:
         raise ValueError(f"Split has no event fragments for '{event_label}'. Cannot build 50/50.")
-    if nothings.empty:
+    if nothings_df.empty:
         raise ValueError("Split has no Nothing fragments. Cannot build 50/50.")
 
-    # Shuffle order deterministically
-    events = events.sample(frac=1.0, random_state=seed)
-    nothings = nothings.sample(frac=1.0, random_state=seed)
+    # Deterministic shuffle for stable ordering
+    events_df = events_df.sample(frac=1.0, random_state=seed)
+    nothings_df = nothings_df.sample(frac=1.0, random_state=seed)
 
+    # ---- Load ALL event fragments first (anchor) into memory as chunks ----
+    event_chunks: List[Tuple[np.ndarray, str, int]] = []  # (feat, path, n_frames)
+    for _, row in events_df.iterrows():
+        try:
+            feat, path = load_fragment(row, expected_n_mels)
+        except Exception as e:
+            logger.warning("Skipping event fragment due to error: %s", e)
+            continue
+        n_frames = int(feat.shape[1])
+        if n_frames <= 0:
+            continue
+        event_chunks.append((feat, str(path), n_frames))
+
+    if not event_chunks:
+        raise RuntimeError("No valid event fragments could be loaded; sequence cannot be built.")
+
+    total_event_frames = sum(n for _, _, n in event_chunks)
+    target_event = total_event_frames
+    target_nothing = total_event_frames  # 50/50
+
+    # ---- Prepare Nothing source rows for sampling (replacement allowed) ----
+    nothing_rows = [r for _, r in nothings_df.iterrows()]
+    if not nothing_rows:
+        raise RuntimeError("No Nothing rows available.")
+
+    rng.shuffle(nothing_rows)
+    nothing_ptr = 0
+
+    def next_nothing_chunk(need_frames: int) -> Tuple[np.ndarray, str, int, bool]:
+        """Get a Nothing chunk; truncate if needed to exactly fit remaining budget."""
+        nonlocal nothing_ptr, nothing_rows
+
+        if nothing_ptr >= len(nothing_rows):
+            rng.shuffle(nothing_rows)
+            nothing_ptr = 0
+
+        row = nothing_rows[nothing_ptr]
+        nothing_ptr += 1
+
+        feat, path = load_fragment(row, expected_n_mels)
+        n_frames = int(feat.shape[1])
+        truncated = False
+
+        if n_frames > need_frames:
+            feat = feat[:, :need_frames]
+            n_frames = int(feat.shape[1])
+            truncated = True
+
+        return feat, str(path), n_frames, truncated
+
+    # ---- Interleaving scheduler ----
     chunks: List[np.ndarray] = []
     segments: List[dict] = []
     cur = 0
 
-    # 1) Include all events (no truncation of events)
-    for _, row in events.iterrows():
-        try:
-            feat, path = load_fragment(row, expected_n_mels)
-        except Exception as e:
-            # If an event fragment is missing/corrupt, we skip with warning.
-            # (If you want strict failure, replace this with raise.)
-            logger.warning("Skipping event fragment due to error: %s", e)
-            continue
-        n_frames = int(feat.shape[1])
-        chunks.append(feat)
-        segments.append(
-            {
-                "label": event_label,
-                "snippet_path": str(path),
-                "start_frame": cur,
-                "end_frame": cur + n_frames,
-                "truncated": False,
-            }
-        )
-        cur += n_frames
+    used_event = 0
+    used_nothing = 0
+    i_event = 0
 
-    event_frames_used = cur
-    if event_frames_used <= 0:
-        raise RuntimeError("No valid event fragments could be loaded; sequence cannot be built.")
+    last_label: Optional[str] = None
+    run_len = 0
 
-    target_nothing_frames = event_frames_used
+    # Build until both budgets are satisfied
+    while used_event < target_event or used_nothing < target_nothing:
+        remaining_event = target_event - used_event
+        remaining_nothing = target_nothing - used_nothing
 
-    # 2) Add Nothing until it matches event frames
-    nothing_used = 0
-    nothing_rows = [r for _, r in nothings.iterrows()]
-    ptr = 0
+        # Prefer the label with the largest remaining budget (deficit scheduling)
+        if remaining_event <= 0:
+            preferred = "Nothing"
+        elif remaining_nothing <= 0:
+            preferred = event_label
+        else:
+            if remaining_event > remaining_nothing:
+                preferred = event_label
+            elif remaining_nothing > remaining_event:
+                preferred = "Nothing"
+            else:
+                preferred = event_label if rng.random() < 0.5 else "Nothing"
 
-    while nothing_used < target_nothing_frames:
-        if ptr >= len(nothing_rows):
-            # Replacement: reshuffle and reuse Nothing
-            rng.shuffle(nothing_rows)
-            ptr = 0
+        # Apply run-limit to avoid long streaks
+        if max_run_same_label is not None and max_run_same_label > 0:
+            if last_label is not None and run_len >= max_run_same_label:
+                if last_label == event_label and remaining_nothing > 0:
+                    preferred = "Nothing"
+                elif last_label == "Nothing" and remaining_event > 0:
+                    preferred = event_label
 
-        row = nothing_rows[ptr]
-        ptr += 1
+        # If preferred is event but we ran out of event chunks, force Nothing
+        if preferred == event_label and i_event >= len(event_chunks):
+            preferred = "Nothing"
 
-        try:
-            feat, path = load_fragment(row, expected_n_mels)
-        except Exception as e:
-            logger.warning("Skipping nothing fragment due to error: %s", e)
-            continue
+        # If preferred is Nothing but its budget is done, force event if available
+        if preferred == "Nothing" and remaining_nothing <= 0 and i_event < len(event_chunks):
+            preferred = event_label
 
-        n_frames = int(feat.shape[1])
-        remaining = target_nothing_frames - nothing_used
+        # Emit next chunk
+        if preferred == event_label:
+            feat, path, n_frames = event_chunks[i_event]
+            i_event += 1
 
-        truncated = False
-        if n_frames > remaining:
-            feat = feat[:, :remaining]
-            n_frames = int(feat.shape[1])
-            truncated = True
+            # Safety guard: don't exceed event budget (normally shouldn't happen)
+            truncated = False
+            if used_event + n_frames > target_event:
+                keep = target_event - used_event
+                if keep <= 0:
+                    continue
+                feat = feat[:, :keep]
+                n_frames = int(feat.shape[1])
+                truncated = True
 
-        chunks.append(feat)
-        segments.append(
-            {
-                "label": "Nothing",
-                "snippet_path": str(path),
-                "start_frame": cur,
-                "end_frame": cur + n_frames,
-                "truncated": truncated,
-            }
-        )
-        cur += n_frames
-        nothing_used += n_frames
+            chunks.append(feat)
+            segments.append(
+                {
+                    "label": event_label,
+                    "snippet_path": path,
+                    "start_frame": cur,
+                    "end_frame": cur + n_frames,
+                    "truncated": truncated,
+                }
+            )
+            cur += n_frames
+            used_event += n_frames
+
+        else:
+            if remaining_nothing <= 0:
+                break
+
+            feat, path, n_frames, truncated = next_nothing_chunk(remaining_nothing)
+            if n_frames <= 0:
+                continue
+
+            chunks.append(feat)
+            segments.append(
+                {
+                    "label": "Nothing",
+                    "snippet_path": path,
+                    "start_frame": cur,
+                    "end_frame": cur + n_frames,
+                    "truncated": truncated,
+                }
+            )
+            cur += n_frames
+            used_nothing += n_frames
+
+        # Run tracking
+        if preferred == last_label:
+            run_len += 1
+        else:
+            last_label = preferred
+            run_len = 1
 
     combined = np.concatenate(chunks, axis=1)
 
     meta = {
-        "frames_event": int(event_frames_used),
-        "frames_nothing": int(nothing_used),
+        "frames_event": int(used_event),
+        "frames_nothing": int(used_nothing),
         "total_frames": int(combined.shape[1]),
     }
     return combined, segments, meta
@@ -372,7 +459,6 @@ def save_sequence_and_manifests(
             }
         )
 
-    # per-split manifests
     pd.DataFrame([summary]).to_csv(split_dir / "manifest_sequences_summary.csv", index=False)
     pd.DataFrame(seg_rows).to_csv(split_dir / "manifest_sequences.csv", index=False)
 
@@ -404,6 +490,8 @@ def main(cli_args: Optional[Sequence[str]] = None) -> None:
     all_summaries: List[dict] = []
     all_segments: List[dict] = []
 
+    split_seed_offset = {"train": 0, "val": 1, "test": 2}
+
     # One sequence per split
     for split in split_labels:
         df_split = df[df["split"] == split].copy()
@@ -411,12 +499,13 @@ def main(cli_args: Optional[Sequence[str]] = None) -> None:
             logger.warning("Split '%s' is empty, skipping.", split)
             continue
 
-        # Build 50/50 by frames (event is anchor)
-        features, segments, meta = build_one_sequence_50_50(
+        # Build 50/50 by frames with INTERLEAVING
+        features, segments, meta = build_one_sequence_50_50_interleaved(
             df_split=df_split,
             event_label=args.event_label,
             expected_n_mels=args.expected_n_mels,
-            seed=args.seed + (0 if split == "train" else 1 if split == "val" else 2),
+            seed=args.seed + split_seed_offset.get(split, 0),
+            max_run_same_label=args.max_run_same_label,
         )
 
         # Save
@@ -436,13 +525,14 @@ def main(cli_args: Optional[Sequence[str]] = None) -> None:
         all_segments.extend(seg_rows)
 
         logger.info(
-            "Split %s: total_frames=%d | event=%d | nothing=%d | pct_event=%.4f | pct_nothing=%.4f",
+            "Split %s: total_frames=%d | event=%d | nothing=%d | pct_event=%.4f | pct_nothing=%.4f | segments=%d",
             split,
             summary["total_frames"],
             summary["frames_event"],
             summary["frames_nothing"],
             summary["pct_event"],
             summary["pct_nothing"],
+            summary["n_segments"],
         )
 
     # Global manifests
