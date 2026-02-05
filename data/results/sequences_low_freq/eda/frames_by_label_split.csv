@@ -1,7 +1,7 @@
 split,label,frames,segments,split_total_frames,frame_fraction
 test,G01,1513,26,3026,0.5
-test,Nothing,1513,26,3026,0.5
+test,Nothing,1513,28,3026,0.5
 train,G01,13058,174,26116,0.5
-train,Nothing,13058,230,26116,0.5
+train,Nothing,13058,227,26116,0.5
 val,G01,3176,49,6352,0.5
-val,Nothing,3176,65,6352,0.5
+val,Nothing,3176,64,6352,0.5
